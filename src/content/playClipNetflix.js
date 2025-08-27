@@ -25,7 +25,9 @@ import { getApiEndpoint } from './../api.js';
   const COLOR_DEFAULT = window.COLOR_DETAIL_DEFAULT || "#FFFFFF";
   const COLOR_LOOPING = window.COLOR_DETAIL_ACTIVE || "#FF0000";
   let isLooping = false;
-  let togglekey = true;
+  let togglekey = false; // 次のClipを再生するかどうかのトグル状態
+
+  chrome.runtime.sendMessage({ type: "nf:init-bridge" });
 
   function createLoopButton() {
     const svgIcon = window.createMoreDetailSVG(COLOR_DEFAULT);
@@ -384,15 +386,16 @@ import { getApiEndpoint } from './../api.js';
   // ---------------------------------------------------------------------------
   function setupPlayer() {
     const end = Number(clipData.endtime);
+    const start = Number(clipData.starttime);
 
     if (videoPlayer.readyState >= 1) {
       console.info('[Video] metadata already available, skipping wait.');
-      monitorClipEnd(end);
+      monitorClipEnd(end,start);
       startCountdownLogger(end);
     } else {
       videoPlayer.addEventListener('loadedmetadata', () => {
         console.info('[Video] metadata loaded. duration =', videoPlayer.duration);
-        monitorClipEnd(end);
+        monitorClipEnd(end,start);
         startCountdownLogger(end);
       });
     }
@@ -405,7 +408,7 @@ import { getApiEndpoint } from './../api.js';
   // ---------------------------------------------------------------------------
   // 終了時間を監視し、達したらvideoを停止・イベント解除・リロード
   // ---------------------------------------------------------------------------
-  function monitorClipEnd(end) {
+  function monitorClipEnd(end,start) {
     function onTimeUpdate() {
       if (videoPlayer.currentTime + EPSILON >= end) {
         console.info('[Clip] Reached end, pausing and reloading.');
@@ -420,7 +423,8 @@ import { getApiEndpoint } from './../api.js';
           playNextClip(); // 次のクリップを再生
         }else {
           console.log("クリップ再度再生");
-          reloadPageFromScript ();
+          seekToSec(start); // クリップの最初に戻る
+          videoPlayer.play(); // 再生を続行
         }
       }
     }
@@ -452,6 +456,11 @@ import { getApiEndpoint } from './../api.js';
   console.log('[Netflix API] Player found:', player);
   player.seek(time);  // timeへ
   player.play();     // 再生
+  }
+
+  
+  function seekToSec(sec) {
+  window.postMessage({ __nf_cmd: "seek", sec: Number(sec) }, "*");
   }
 
 
