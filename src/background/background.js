@@ -9,59 +9,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 
 //netflix用ブリッジ注入
-// content から {type:"nf:init-bridge"} を受けたタブに、MAINワールドでブリッジを注入
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type !== "nf:init-bridge") return;
+// background.js — content から {type:"seek", sec:数字} を受け取ってシーク
+chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
+  if (msg?.type !== "seek") return;
 
-  const tabId = sender?.tab?.id;
-  if (!tabId) return;
+  const sec = Number(msg.sec);
+  if (!Number.isFinite(sec)) return;
 
-  chrome.scripting.executeScript({
-    target: { tabId },
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) return;
+  if (!/^https:\/\/www\.netflix\.com\/watch\//.test(tab.url || "")) return;// Clip再生ページを判定するロジックをここで追加　クエリで要れる
+
+  await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
     world: "MAIN",
-    func: () => {
-      if (window.__nfBridgeInjected__) return; // 二重注入防止
-      window.__nfBridgeInjected__ = true;
+    args: [sec],
+    func: (sec) => {
+      function getNetflixPlayer() {
+        try {
+          const appCtx    = window.netflix?.appContext;
+          const playerApp = appCtx?.state?.playerApp?.getAPI?.();
+          const vp        = playerApp?.videoPlayer;
+          const ids       = vp?.getAllPlayerSessionIds?.();
+          if (!ids?.length) return null;
+          return vp?.getVideoPlayerBySessionId?.(ids[0]) || null;
+        } catch { return null; }
+      }
 
-      (function pageBridge() {
-        function getNetflixPlayer() {
-          try {
-            const appCtx    = window.netflix?.appContext;
-            const playerApp = appCtx?.state?.playerApp?.getAPI?.();
-            const vp        = playerApp?.videoPlayer;
-            const ids       = vp?.getAllPlayerSessionIds?.();
-            if (!ids?.length) return null;
-            return vp?.getVideoPlayerBySessionId?.(ids[0]) || null;
-          } catch { return null; }
-        }
-        // 秒⇔ミリ秒の自動判定（duration が 1e5 超なら ms 系）
-        function seekSeconds(p, sec) {
-          let dur = 0;
-          try { dur = p.getDuration?.() ?? 0; } catch {}
-          const useMs  = dur > 1e5;
-          const target = useMs ? sec * 1000 : sec;
-          p.seek?.(target);
-        }
-        function doSeek(sec) {
-          if (!Number.isFinite(sec)) return;
-          let tries = 30;
-          (function go() {
-            const p = getNetflixPlayer();
-            if (!p) { if (tries-- > 0) return setTimeout(go, 200); else return; }
-            seekSeconds(p, sec);
-          })();
-        }
-        // content → page のコマンド受け口
-        window.addEventListener("message", (ev) => {
-          const d = ev.data;
-          if (!d || d.__nf_cmd !== "seek") return;
-          doSeek(Number(d.sec));
-        });
+      function seekSeconds(p, sec) {
+        let dur = 0;
+        try { dur = p.getDuration?.() ?? 0; } catch {}
+        const useMs = dur > 1e5;
+        const target = useMs ? sec * 1000 : sec;
+        p.seek?.(target);
+      }
+
+      let tries = 30;
+      (function go() {
+        const p = getNetflixPlayer();
+        if (!p) { if (tries-- > 0) return setTimeout(go, 200); else return; }
+        seekSeconds(p, sec);
       })();
     }
-  }, () => sendResponse({ ok: true }));
+  });
 
-  return true; // async sendResponse
+  sendResponse({ ok: true });
+  return true; // async sendResponse のため
 });
+
 
 
