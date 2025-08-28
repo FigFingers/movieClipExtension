@@ -369,7 +369,6 @@ import { getApiEndpoint } from './../api.js';
   // メイン処理の開始：URL・clipデータ・video要素の準備ができたら再生処理へ
   // ---------------------------------------------------------------------------
   async function init() {
-    // URLにclip=1が付いていなければ追加してリロード
     ensureClipTagInURL();
 
     try {
@@ -390,12 +389,10 @@ import { getApiEndpoint } from './../api.js';
     const start = Number(clipData.starttime);
 
     if (videoPlayer.readyState >= 1) {
-      console.info('[Video] metadata already available, skipping wait.');
       monitorClipEnd(end,start);
       startCountdownLogger(end);
     } else {
       videoPlayer.addEventListener('loadedmetadata', () => {
-        console.info('[Video] metadata loaded. duration =', videoPlayer.duration);
         monitorClipEnd(end,start);
         startCountdownLogger(end);
       });
@@ -413,7 +410,6 @@ import { getApiEndpoint } from './../api.js';
     function onTimeUpdate() {
       if (videoPlayer.currentTime + EPSILON >= end) {
         console.info('[Clip] Reached end, pausing and reloading.');
-        videoPlayer.pause();
         videoPlayer.removeEventListener('timeupdate', onTimeUpdate);
 
         clearInterval(countdownIntervalId);
@@ -425,7 +421,7 @@ import { getApiEndpoint } from './../api.js';
         }else {
           console.log("クリップ再度再生");
           chrome.runtime.sendMessage({ type: "seek", sec: start }); 
-          videoPlayer.play(); // 再生を続行
+          init(); // クリップの最初に戻る
         }
       }
     }
