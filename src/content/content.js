@@ -19,8 +19,8 @@ import { getApiEndpoint } from './../api.js';
 
 
   window.addEventListener('load', () => {
-    // インジェクションスクリプトの注入
-    injectScript('history_change.js');
+    // 履歴変更フック用スクリプトをページワールドへ注入
+    injectScript('src/util/history_change.js');
 
     // 要素の作成
     const buttonMargin = createButtonMargin();

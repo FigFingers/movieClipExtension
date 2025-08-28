@@ -21,6 +21,7 @@ import { getApiEndpoint } from './../api.js';
   const SELECTOR_STANDARD = '[data-uia="controls-standard"]';
   const SELECTOR_EPISODE = '[data-uia="control-episodes"]';
   const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
+    
 
   const COLOR_DEFAULT = window.COLOR_DETAIL_DEFAULT || "#FFFFFF";
   const COLOR_LOOPING = window.COLOR_DETAIL_ACTIVE || "#FF0000";
@@ -53,7 +54,7 @@ import { getApiEndpoint } from './../api.js';
     btn.style.cursor = "pointer";
     btn.addEventListener("click", () => {
       togglekey = !togglekey; // トグル状態を切り替え
-      svgIcon.style.color = togglekey ? COLOR_DEFAULT : COLOR_LOOPING;
+      svgIcon.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
       console.log("▶️ 次のクリップを再生ボタンがクリックされました");
     });
     return { btn,svg: svgIcon};
