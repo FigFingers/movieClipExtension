@@ -83,13 +83,6 @@ import { getApiEndpoint } from './../api.js';
       button.setAttribute('aria-label', '録画ボタン');
       return button;
     }
-    function createSVGElement(type, attributes) {
-      const elem = document.createElementNS(SVG_NAMESPACE, type);
-      for (const [key, value] of Object.entries(attributes)) {
-        elem.setAttribute(key, value);
-      }
-      return elem;
-    }
 
     function handleRecordButtonClick() {
       try { // 関数内でエラーハンドリング
