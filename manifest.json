@@ -7,11 +7,13 @@
   "permissions": [
     "activeTab",
     "storage",
-    "tabs"
+    "tabs",
+    "scripting" 
   ],
 
   "host_permissions": [
-    "http://localhost:3000/*"
+    "http://localhost:3000/*",
+    "https://www.netflix.com/*"  
   ],
 
   "background": {
@@ -22,7 +24,8 @@
     {
       "matches": ["https://www.netflix.com/*"],
       "run_at": "document_end",
-      "js": ["src/inject/inject_script.js"]
+      "js": ["src/inject/inject_script.js",
+             "src/util/history_change.js"]
     },
     {
       "matches": ["https://www.netflix.com/*"],

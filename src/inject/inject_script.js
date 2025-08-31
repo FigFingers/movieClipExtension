@@ -8,5 +8,5 @@
     (tag || document.head).appendChild(script);
   }
 
-  injectScript("history_change.js");
+  injectScript("src/util/history_change.js");
 })();

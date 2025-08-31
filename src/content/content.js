@@ -1,8 +1,8 @@
 import "../css/content_button.css";
 import "../image/moreDetailSVG.js";
 import "../image/recordSVG.js";
+import "../image/LoopButtonSVG.js";
 import "./playClipNetflix.js";
-import "./replaybutton_mergeToplayClipNetflix.js";
 import { getApiEndpoint } from './../api.js';
 
 (function() {
@@ -19,8 +19,8 @@ import { getApiEndpoint } from './../api.js';
 
 
   window.addEventListener('load', () => {
-    // インジェクションスクリプトの注入
-    injectScript('history_change.js');
+    // 履歴変更フック用スクリプトをページワールドへ注入
+    injectScript('src/util/history_change.js');
 
     // 要素の作成
     const buttonMargin = createButtonMargin();
@@ -64,6 +64,7 @@ import { getApiEndpoint } from './../api.js';
       const script = document.createElement('script');
       script.src = chrome.runtime.getURL(file);
       script.onload = function() {
+        console.log(`Injected script: ${file}`);
         this.remove();
       };
       (tag || document.head).appendChild(script);
@@ -199,80 +200,80 @@ import { getApiEndpoint } from './../api.js';
       if (host.includes('hulu.jp') || host.includes('hulu.com')) return 'Hulu';
       return 'Unknown';
     }
-function openSidebar(data, videoPlayer) {
-  const SIDEBAR_ID = "nf-memo-sidebar";
-  const SIDEBAR_PCT = 20;
+    function openSidebar(data, videoPlayer) {
+      const SIDEBAR_ID = "nf-memo-sidebar";
+      const SIDEBAR_PCT = 20;
 
-  const player = document.querySelector(".watch-video--player-view") || videoPlayer?.parentElement;
-  if (!player) return;
+      const player = document.querySelector(".watch-video--player-view") || videoPlayer?.parentElement;
+      if (!player) return;
 
-  document.getElementById(SIDEBAR_ID)?.remove();
+      document.getElementById(SIDEBAR_ID)?.remove();
 
-  player.style.transition = "width .3s";
-  player.style.width = `calc(100% - ${SIDEBAR_PCT}%)`;
+      player.style.transition = "width .3s";
+      player.style.width = `calc(100% - ${SIDEBAR_PCT}%)`;
 
-  const sb = document.createElement("div");
-  sb.id = SIDEBAR_ID;
-  sb.style.cssText = `
-    position:fixed;top:0;right:0;width:${SIDEBAR_PCT}%;
-    height:100%;background:rgba(0,0,0,.85);padding:10px;
-    box-sizing:border-box;z-index:9999;display:flex;flex-direction:column;gap:8px;`;
+      const sb = document.createElement("div");
+      sb.id = SIDEBAR_ID;
+      sb.style.cssText = `
+        position:fixed;top:0;right:0;width:${SIDEBAR_PCT}%;
+        height:100%;background:rgba(0,0,0,.85);padding:10px;
+        box-sizing:border-box;z-index:9999;display:flex;flex-direction:column;gap:8px;`;
 
-  const header = document.createElement("div");
-  header.style.cssText = "display:flex;justify-content:space-between;align-items:center;";
-  const title = document.createElement("strong");
-  title.textContent = "録画メモ";
-  const closeBtn = document.createElement("button");
-  closeBtn.textContent = "×";
-  closeBtn.style.cssText = "background:red;color:#fff;border:none;cursor:pointer;";
-  closeBtn.onclick = () => {
-    player.style.width = "100%";
-    sb.remove();
-  };
-  header.append(title, closeBtn);
-  sb.appendChild(header);
+      const header = document.createElement("div");
+      header.style.cssText = "display:flex;justify-content:space-between;align-items:center;";
+      const title = document.createElement("strong");
+      title.textContent = "録画メモ";
+      const closeBtn = document.createElement("button");
+      closeBtn.textContent = "×";
+      closeBtn.style.cssText = "background:red;color:#fff;border:none;cursor:pointer;";
+      closeBtn.onclick = () => {
+        player.style.width = "100%";
+        sb.remove();
+      };
+      header.append(title, closeBtn);
+      sb.appendChild(header);
 
-  const infoBox = document.createElement("div");
-  infoBox.style.fontSize = "12px";
-  const start = Math.floor(data?.StartTime || 0);
-  const end = Math.floor(data?.EndTime || 0);
-  const formatTime = sec => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
-  infoBox.innerHTML = `
-    <div><b>タイトル:</b> ${data?.title || '(不明)'}</div>
-    <div><b>エピソード:</b> ${data?.epnumber || '-'}</div>
-    <div><b>サービス:</b> ${data?.service || '-'}</div>
-    <div><b>開始:</b> ${formatTime(start)}</div>
-    <div><b>終了:</b> ${formatTime(end)}</div>
-    <div><b>URL:</b> ${data?.URL || location.href}</div>`;
-  sb.appendChild(infoBox);
+      const infoBox = document.createElement("div");
+      infoBox.style.fontSize = "12px";
+      const start = Math.floor(data?.StartTime || 0);
+      const end = Math.floor(data?.EndTime || 0);
+      const formatTime = sec => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+      infoBox.innerHTML = `
+        <div><b>タイトル:</b> ${data?.title || '(不明)'}</div>
+        <div><b>エピソード:</b> ${data?.epnumber || '-'}</div>
+        <div><b>サービス:</b> ${data?.service || '-'}</div>
+        <div><b>開始:</b> ${formatTime(start)}</div>
+        <div><b>終了:</b> ${formatTime(end)}</div>
+        <div><b>URL:</b> ${data?.URL || location.href}</div>`;
+      sb.appendChild(infoBox);
 
-  const nameLabel = document.createElement("label");
-  nameLabel.style.cssText = "font-size:12px;color:#000;";
-  nameLabel.textContent = "名前:";
-  const nameInput = document.createElement("input");
-  nameInput.style.cssText = "width:100%;margin-top:4px;";
-  nameLabel.appendChild(nameInput);
-  sb.appendChild(nameLabel);
+      const nameLabel = document.createElement("label");
+      nameLabel.style.cssText = "font-size:12px;color:#000;";
+      nameLabel.textContent = "名前:";
+      const nameInput = document.createElement("input");
+      nameInput.style.cssText = "width:100%;margin-top:4px;";
+      nameLabel.appendChild(nameInput);
+      sb.appendChild(nameLabel);
 
-  const saveBtn = document.createElement("button");
-  saveBtn.textContent = "保存";
-  saveBtn.style.cssText = "background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;";
+      const saveBtn = document.createElement("button");
+      saveBtn.textContent = "保存";
+      saveBtn.style.cssText = "background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;";
 
-  saveBtn.onclick = () => {
-    const enriched = {
-      ...data,
-      clipName: nameInput.value.trim(),
-    };
-    console.log("保存データ:", enriched);
-    sendData(enriched);
-    alert("送信しました！");
-    videoPlayer.play(); // ← ここで再生
-    closeBtn.click();
-  };
-  sb.appendChild(saveBtn);
+      saveBtn.onclick = () => {
+        const enriched = {
+          ...data,
+          clipName: nameInput.value.trim(),
+        };
+        console.log("保存データ:", enriched);
+        sendData(enriched);
+        alert("送信しました！");
+        videoPlayer.play(); // ← ここで再生
+        closeBtn.click();
+      };
+      sb.appendChild(saveBtn);
 
-  document.body.appendChild(sb);
-}
+      document.body.appendChild(sb);
+    }
 
 
       /**
