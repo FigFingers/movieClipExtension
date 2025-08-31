@@ -439,20 +439,6 @@ import { getApiEndpoint } from './../api.js';
     }, 1000);
   }
 
-  // ---------------------------------------------------------------------------
-  // Netflix apiを使用　（規約上　おそらくアウト）　後で消せ　機能不全
-  // ---------------------------------------------------------------------------
-  function getNetflixApi(time) {
-  // 非公式：playerオブジェクト取得とseek（規約NG）
-  const player = netflix.appContext.state.playerApp.getAPIPlayerBySessionId(0);
-  if (!player) {
-    console.error('[Netflix API] Player not found');
-    return;
-  }
-  console.log('[Netflix API] Player found:', player);
-  player.seek(time);  // timeへ
-  player.play();     // 再生
-  }
 
 
   // ---------------------------------------------------------------------------
