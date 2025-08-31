@@ -23,9 +23,8 @@
   "content_scripts": [
     {
       "matches": ["https://www.netflix.com/*"],
-      "run_at": "document_end",
-      "js": ["src/inject/inject_script.js",
-             "src/util/history_change.js"]
+      "run_at": "document_start",
+      "js": ["src/inject/inject_script.js"]
     },
     {
       "matches": ["https://www.netflix.com/*"],
