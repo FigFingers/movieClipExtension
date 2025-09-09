@@ -13,7 +13,8 @@
 
   "host_permissions": [
     "http://localhost:3000/*",
-    "https://www.netflix.com/*"  
+    "https://www.netflix.com/*" ,
+    "https://www.disneyplus.com/*"
   ],
 
   "background": {
@@ -31,6 +32,11 @@
       "matches": ["https://www.netflix.com/*"],
       "run_at": "document_idle",
       "js": ["dist/content.js"]
+    },
+    {
+      "matches": ["https://www.disneyplus.com/*"],
+      "run_at": "document_idle",
+      "js": ["dist/disney.js"]
     },
     {
       "matches": ["http://localhost:3000/*"],

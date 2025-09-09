@@ -4,6 +4,7 @@ module.exports = {
   mode: "production",
   entry: {
     content: "./src/content/content.js",
+    disney: "./src/content/disney_content.js"
   },
   output: {
     filename: "[name].js",
