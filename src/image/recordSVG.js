@@ -3,15 +3,15 @@
   const COLOR_DEFAULT = "#FFFFFF";
   const COLOR_RECORDING = "#FF0000";
 
-  function createSVG() {
+  function createSVG(width = "120%", height = "120%") {//デフォルトは120%でnetflixにフィットさせています。
     const svg = createSVGElement("svg", {
       id: "Layer_1",
       "data-name": "Layer 1",
       xmlns: SVG_NAMESPACE,
       viewBox: "0 0 24 24",
       "stroke-width": "1.5",
-      width: "120%",
-      height: "120%",
+      width: width,
+      height: height,
       color: COLOR_DEFAULT
     });
 
