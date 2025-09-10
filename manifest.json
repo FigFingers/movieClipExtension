@@ -31,7 +31,7 @@
     {
       "matches": ["https://www.netflix.com/*"],
       "run_at": "document_idle",
-      "js": ["dist/content.js"]
+      "js": ["dist/netflix.js"]
     },
     {
       "matches": ["https://www.disneyplus.com/*"],
