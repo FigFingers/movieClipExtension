@@ -18,8 +18,8 @@ import { getApiEndpoint } from "./../api.js";
 	// ---------------------------------------------------------------------------
 	const SELECTOR_STANDARD = '[data-uia="controls-standard"]';
 	const SELECTOR_EPISODE = '[data-uia="control-episodes"]';
-	const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
-	const SELECTOR_VOLUME = '[data-uia="control-volume-high"]';
+        const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
+        const SELECTOR_VOLUME = '[data-uia="control-volume-high"]';
 	const SELECTOR_TITLE = '[data-uia="video-title"]';
 
 	const IDS = {
@@ -448,87 +448,95 @@ import { getApiEndpoint } from "./../api.js";
 	// ボタン（3種）生成：元ロジック（UIが出たら一括注入）
 	// ---------------------------------------------------------------------------
 	function createButtonsIfNeeded() {
-		const controls = q(SELECTOR_STANDARD);
-		const episodeBtn = q(SELECTOR_EPISODE);
-		const fwd10 = q(SELECTOR_FWD10);
+                const controls = q(SELECTOR_STANDARD);
+                const episodeBtn = q(SELECTOR_EPISODE);
+                const fwd10 = q(SELECTOR_FWD10);
+                const volumeBtn = q(SELECTOR_VOLUME);
 
-		const hasRecord = document.getElementById(IDS.recordBtn);
-		const hasSidebar = document.getElementById(IDS.toggleSidebarBtn);
-		const hasNext = document.getElementById(IDS.nextClipBtn);
+                const hasRecord = document.getElementById(IDS.recordBtn);
+                let wrapper = document.getElementById(IDS.wrapper);
+                const spacer = document.getElementById(IDS.spacer);
 
-		// UIが揃っており、まだ生成されていない場合に作成
-		if (
-			controls &&
-			episodeBtn &&
-			fwd10 &&
-			(!hasRecord || !hasSidebar || !hasNext)
-		) {
-			// ラッパ
-			const wrapper = document.createElement("div");
-			wrapper.id = IDS.wrapper;
-			wrapper.className = episodeBtn.parentNode.className; // ネイティブUI風に
-			wrapper.style.display = "flex";
-			wrapper.style.alignItems = "center";
-			wrapper.style.gap = "0.5rem";
+                // UIが揃っており、まだ生成されていない場合に作成
+                if (controls && episodeBtn && fwd10 && volumeBtn) {
+                        const episodeBtnParent = episodeBtn.parentNode;
+                        if (episodeBtnParent) {
+                                if (!hasRecord) {
+                                        const recordBtn = document.createElement("button");
+                                        recordBtn.id = IDS.recordBtn;
+                                        recordBtn.setAttribute("aria-label", "録画ボタン");
+                                        recordBtn.className = episodeBtn.className;
+                                        recordBtn.style.cursor = "pointer";
+                                        const recordSvg = window.createSVG?.();
+                                        if (recordSvg) {
+                                                recordBtn.appendChild(recordSvg);
+                                        }
+                                        recordBtn.addEventListener("click", handleRecordClick);
 
-			// 録画ボタン
-			const recordBtn = document.createElement("button");
-			recordBtn.id = IDS.recordBtn;
-			recordBtn.setAttribute("aria-label", "録画ボタン");
-			recordBtn.className = episodeBtn.className;
-			recordBtn.style.cursor = "pointer";
-			const recordSvg = window.createSVG?.();
-			if (recordSvg) {
-				recordBtn.appendChild(recordSvg);
-			}
-			recordBtn.addEventListener("click", handleRecordClick);
+                                        const parent = volumeBtn.parentNode;
+                                        if (parent?.insertBefore) {
+                                                parent.insertBefore(recordBtn, volumeBtn.nextSibling);
+                                        } else {
+                                                volumeBtn.after?.(recordBtn);
+                                        }
+                                }
 
-			// 次クリップトグル
-			const nextBtn = document.createElement("button");
-			nextBtn.id = IDS.nextClipBtn;
-			nextBtn.setAttribute("aria-label", "次のクリップを再生");
-			nextBtn.className = episodeBtn.className;
-			nextBtn.style.cursor = "pointer";
-			const nextSvg = window.LoopButtonSVG?.(COLORS.default);
-			if (nextSvg) nextBtn.appendChild(nextSvg);
-			nextBtn.addEventListener("click", () => {
-				nextClipToggleOn = !nextClipToggleOn;
-				if (nextSvg?.style)
-					nextSvg.style.color = nextClipToggleOn
-						? COLORS.active
-						: COLORS.default;
-				console.log("▶️ 次のクリップを再生トグル:", nextClipToggleOn);
-			});
+                                if (!wrapper) {
+                                        wrapper = document.createElement("div");
+                                        wrapper.id = IDS.wrapper;
+                                        wrapper.className = episodeBtnParent.className; // ネイティブUI風に
+                                        wrapper.style.display = "flex";
+                                        wrapper.style.alignItems = "center";
+                                        wrapper.style.gap = "0.5rem";
+                                        episodeBtnParent.after(wrapper);
+                                }
 
-			// サイドバー開閉
-			const toggleBtn = document.createElement("button");
-			toggleBtn.id = IDS.toggleSidebarBtn;
-			toggleBtn.setAttribute("aria-label", "メモサイドバー開閉");
-			toggleBtn.className = episodeBtn.className;
-			toggleBtn.style.cursor = "pointer";
-			const detailSvg = window.createMoreDetailSVG?.(COLORS.default);
-			if (detailSvg) toggleBtn.appendChild(detailSvg);
-			toggleBtn.addEventListener("click", () => {
-				isLoopSidebarOn = !isLoopSidebarOn;
-				if (detailSvg?.style)
-					detailSvg.style.color = isLoopSidebarOn
-						? COLORS.active
-						: COLORS.default;
-				isLoopSidebarOn ? openSidebarList() : closeSidebar();
-			});
+                                if (!document.getElementById(IDS.nextClipBtn)) {
+                                        const nextBtn = document.createElement("button");
+                                        nextBtn.id = IDS.nextClipBtn;
+                                        nextBtn.setAttribute("aria-label", "次のクリップを再生");
+                                        nextBtn.className = episodeBtn.className;
+                                        nextBtn.style.cursor = "pointer";
+                                        const nextSvg = window.LoopButtonSVG?.(COLORS.default);
+                                        if (nextSvg) nextBtn.appendChild(nextSvg);
+                                        nextBtn.addEventListener("click", () => {
+                                                nextClipToggleOn = !nextClipToggleOn;
+                                                if (nextSvg?.style)
+                                                        nextSvg.style.color = nextClipToggleOn
+                                                                ? COLORS.active
+                                                                : COLORS.default;
+                                                console.log("▶️ 次のクリップを再生トグル:", nextClipToggleOn);
+                                        });
+                                        wrapper.appendChild(nextBtn);
+                                }
 
-			// DOMへ配置
-			wrapper.appendChild(recordBtn);
-			wrapper.appendChild(nextBtn);
-			wrapper.appendChild(toggleBtn);
-			episodeBtn.parentNode.after(wrapper);
+                                if (!document.getElementById(IDS.toggleSidebarBtn)) {
+                                        const toggleBtn = document.createElement("button");
+                                        toggleBtn.id = IDS.toggleSidebarBtn;
+                                        toggleBtn.setAttribute("aria-label", "メモサイドバー開閉");
+                                        toggleBtn.className = episodeBtn.className;
+                                        toggleBtn.style.cursor = "pointer";
+                                        const detailSvg = window.createMoreDetailSVG?.(COLORS.default);
+                                        if (detailSvg) toggleBtn.appendChild(detailSvg);
+                                        toggleBtn.addEventListener("click", () => {
+                                                isLoopSidebarOn = !isLoopSidebarOn;
+                                                if (detailSvg?.style)
+                                                        detailSvg.style.color = isLoopSidebarOn
+                                                                ? COLORS.active
+                                                                : COLORS.default;
+                                                isLoopSidebarOn ? openSidebarList() : closeSidebar();
+                                        });
+                                        wrapper.appendChild(toggleBtn);
+                                }
 
-			// スペーサ
-			const spacer = document.createElement("div");
-			spacer.id = IDS.spacer;
-			spacer.style.minWidth = "3rem";
-			episodeBtn.parentNode.after(spacer);
-		}
+                                if (!spacer) {
+                                        const spacerEl = document.createElement("div");
+                                        spacerEl.id = IDS.spacer;
+                                        spacerEl.style.minWidth = "3rem";
+                                        episodeBtnParent.after(spacerEl);
+                                }
+                        }
+                }
 
 		// UIが消えたら撤去
 		if (!fwd10) {
