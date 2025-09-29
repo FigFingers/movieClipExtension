@@ -19,7 +19,7 @@ import { getApiEndpoint } from "./../api.js";
 	const SELECTOR_STANDARD = '[data-uia="controls-standard"]';
 	const SELECTOR_EPISODE = '[data-uia="control-episodes"]';
 	const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
-	const SELECTOR_VOLUME = '[data-uia="control-volume-high"]';
+        const SELECTOR_VOLUME = '[data-uia^="control-volume"]';
 	const SELECTOR_TITLE = '[data-uia="video-title"]';
 
 	const IDS = {
@@ -449,8 +449,9 @@ import { getApiEndpoint } from "./../api.js";
 	// ---------------------------------------------------------------------------
 	function createButtonsIfNeeded() {
 		const controls = q(SELECTOR_STANDARD);
-		const episodeBtn = q(SELECTOR_EPISODE);
-		const fwd10 = q(SELECTOR_FWD10);
+                const episodeBtn = q(SELECTOR_EPISODE);
+                const fwd10 = q(SELECTOR_FWD10);
+                const volumeBtn = q(SELECTOR_VOLUME);
 
 		const hasRecord = document.getElementById(IDS.recordBtn);
 		const hasSidebar = document.getElementById(IDS.toggleSidebarBtn);
@@ -517,18 +518,32 @@ import { getApiEndpoint } from "./../api.js";
 				isLoopSidebarOn ? openSidebarList() : closeSidebar();
 			});
 
-			// DOMへ配置
-			wrapper.appendChild(recordBtn);
-			wrapper.appendChild(nextBtn);
-			wrapper.appendChild(toggleBtn);
-			episodeBtn.parentNode.after(wrapper);
+                        // DOMへ配置
+                        wrapper.appendChild(recordBtn);
+                        wrapper.appendChild(nextBtn);
+                        wrapper.appendChild(toggleBtn);
 
-			// スペーサ
-			const spacer = document.createElement("div");
-			spacer.id = IDS.spacer;
-			spacer.style.minWidth = "3rem";
-			episodeBtn.parentNode.after(spacer);
-		}
+                        const anchor =
+                                volumeBtn?.parentElement ||
+                                episodeBtn?.parentNode ||
+                                null;
+
+                        const spacer = document.createElement("div");
+                        spacer.id = IDS.spacer;
+                        spacer.style.minWidth = "3rem";
+
+                        if (anchor?.after instanceof Function) {
+                                anchor.after(wrapper);
+                                anchor.after(spacer);
+                        } else if (episodeBtn?.parentNode?.after instanceof Function) {
+                                episodeBtn.parentNode.after(wrapper);
+                                episodeBtn.parentNode.after(spacer);
+                        } else if (episodeBtn?.parentNode?.appendChild instanceof Function) {
+                                // フォールバック: 親要素の末尾に追加
+                                episodeBtn.parentNode.appendChild(spacer);
+                                episodeBtn.parentNode.appendChild(wrapper);
+                        }
+                }
 
 		// UIが消えたら撤去
 		if (!fwd10) {
