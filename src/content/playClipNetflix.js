@@ -21,6 +21,7 @@ import { getApiEndpoint } from './../api.js';
   const SELECTOR_STANDARD = '[data-uia="controls-standard"]';
   const SELECTOR_EPISODE = '[data-uia="control-episodes"]';
   const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
+  const SELECTOR_SUBTITLE = '[data-uia="control-audio-subtitle"]';
     
 
   const COLOR_DEFAULT = window.COLOR_DETAIL_DEFAULT || "#FFFFFF";
@@ -63,7 +64,7 @@ import { getApiEndpoint } from './../api.js';
   const uiObserver = new MutationObserver(() => {
     const controls = document.querySelector(SELECTOR_STANDARD);
     const episodeBtn = document.querySelector(SELECTOR_EPISODE);
-    const subtitleBtn = controls.querySelector('[data-uia="control-audio-subtitle"]');
+    const subtitleBtn = document.querySelector(SELECTOR_SUBTITLE);
 
     const loopBtnExists = document.getElementById(BUTTON_ID);
     const nextBtnExists = document.getElementById(NEXT_BUTTON_ID);
