@@ -13,9 +13,10 @@ import { getApiEndpoint } from './../api.js';
     videoPlayer: 'video',
     videoTitle: '[data-uia="video-title"]',
     controlsStandard: '[data-uia="controls-standard"]',
-    controlVolumeHigh: '[data-uia="control-volume-high"]',
+    controlVolume: '[data-uia^="control-volume-"]', 
     controlForward10: '[data-uia="control-forward10"]',
   };
+
 
 
   window.addEventListener('load', () => {
@@ -157,7 +158,7 @@ import { getApiEndpoint } from './../api.js';
     function addElements() {
       const controlsStandardElement = document.querySelector(SELECTORS.controlsStandard);
       if (controlsStandardElement) {
-        const controlVolumeElement = document.querySelector(SELECTORS.controlVolumeHigh);
+        const controlVolumeElement = document.querySelector(SELECTORS.controlVolume);
         if (controlVolumeElement) {
           recordButton.className = controlVolumeElement.className;
           recordButton.appendChild(svgElement);

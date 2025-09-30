@@ -21,6 +21,7 @@ import { getApiEndpoint } from './../api.js';
   const SELECTOR_STANDARD = '[data-uia="controls-standard"]';
   const SELECTOR_EPISODE = '[data-uia="control-episodes"]';
   const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
+  const SELECTOR_SUBTITLE = '[data-uia="control-audio-subtitle"]';
     
 
   const COLOR_DEFAULT = window.COLOR_DETAIL_DEFAULT || "#FFFFFF";
@@ -63,6 +64,7 @@ import { getApiEndpoint } from './../api.js';
   const uiObserver = new MutationObserver(() => {
     const controls = document.querySelector(SELECTOR_STANDARD);
     const episodeBtn = document.querySelector(SELECTOR_EPISODE);
+    const subtitleBtn = document.querySelector(SELECTOR_SUBTITLE);
 
     const loopBtnExists = document.getElementById(BUTTON_ID);
     const nextBtnExists = document.getElementById(NEXT_BUTTON_ID);
@@ -96,6 +98,37 @@ import { getApiEndpoint } from './../api.js';
       const spacer = document.createElement("div");
       spacer.style.minWidth = "3rem";
       episodeBtn.parentNode.after(spacer);
+    }else if (controls && subtitleBtn && (!loopBtnExists || !nextBtnExists) ){
+      // エピソードボタンが検出されない場合、subtitleボタンの横に配置
+      const { btn: loopButton, svg: loopSvg } = createLoopButton();
+      const { btn: playNextClipButton, svg: playSvg } = createPlayNextClipButton();
+
+      loopButton.className = subtitleBtn.className;
+      playNextClipButton.className = subtitleBtn.className;
+
+      // SVGの色を設定（再描画時にも反映）
+      loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
+      playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
+
+      const wrapper = document.createElement("div");
+      wrapper.className = subtitleBtn.parentNode.className;
+      wrapper.style.display = "flex";
+      wrapper.style.alignItems = "center";
+      wrapper.style.gap = "0.5rem";
+
+      const separator = document.createElement("div");
+      separator.style.width = "1rem";
+      separator.style.height = "100%";
+
+      wrapper.appendChild(loopButton);
+      wrapper.appendChild(separator);
+      wrapper.appendChild(playNextClipButton);
+      subtitleBtn.parentNode.after(wrapper);
+
+      const spacer = document.createElement("div");
+      spacer.style.minWidth = "3rem";
+      subtitleBtn.parentNode.after(spacer);
+      
     }
 
     // プレイヤーUIが消えた時にボタンも消す
