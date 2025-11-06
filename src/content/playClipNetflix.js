@@ -483,7 +483,14 @@ import { getApiEndpoint } from './../api.js';
     isScriptReloading = true;
     location.reload();
   }
+  // ---------------------------------------------------------------------------
+  // playlist再生モードの起動
+  //-----------------------------------------------------------------------------
+  function activatePlaymode() {
+    console.log("▶️ プレイリスト再生モードを起動します");
+    playQueue(JSON.parse(localStorage.getItem("playQueue") || "[]"));
 
+  }
   window.addEventListener('beforeunload', (event) => {
   if (!isScriptReloading) {
     console.log('ユーザー操作など、スクリプト以外による再読み込みまたはページ遷移');
@@ -502,6 +509,16 @@ import { getApiEndpoint } from './../api.js';
   // ---------------------------------------------------------------------------
   // ページの読み込みが完了したらinit()を実行
   // ---------------------------------------------------------------------------
-  window.addEventListener('load', init);
+  window.addEventListener("load", async () => {
+    const { playmode } = await chrome.storage.session.get("playmode");
+    await chrome.storage.session.remove("playmode");
 
+    switch (playmode) {
+      case "playlist":
+        activatePlaymode();
+        break;
+      default:
+        init();
+    } 
+  });
 })();
