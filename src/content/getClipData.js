@@ -1,78 +1,88 @@
-// カスタムイベントが実行されたら実行
+// ======================================================
+// getClipData.js - localhost:3000 用 content script
+// ======================================================
+
+// ------------------------------------------------------
+// 初期化ログ
+// ------------------------------------------------------
+console.log("✅ getClipData.js: content script injected on", location.origin);
+console.log("📍 location:", location.href);
+console.log("📦 chrome.storage available:", typeof chrome?.storage);
+
+// ------------------------------------------------------
+// カスタムイベント監視（clip選択・リスト読み込み）
+// ------------------------------------------------------
 window.addEventListener("clipListElementsRendered", () => {
-    console.log("このclipリストを読み込みました！");
 });
+
 window.addEventListener("clipSelected", () => {
-    console.log("このclipを選択しました！");
-    //cookieを読み込む
-    // Clipの再生用データ
-    const playClipData = getCookies();
-    // 取得したCookieをコンソールに表示
-    console.log("Cookies on video:", playClipData);
-    chrome.storage.local.set({ clip: playClipData});
-    //再生機能の起動キー 1が起動 0が不活性化
-    chrome.storage.local.set({ playClipSystemKey: 1});
-    chrome.storage.local.get(["playClipSystemKey"], (result) => {
-        console.log("再生機能の起動キー:", result.playClipSystemKey);
-    });
-  
+  console.log("🎬 このclipを選択しました！");
+  const playClipData = getCookies();
+  console.log("🍪 Cookies on video:", playClipData);
+
+  chrome.storage.local.set({ clip: playClipData });
+  chrome.storage.local.set({ playClipSystemKey: 1 });
+
+  chrome.storage.local.get(["playClipSystemKey"], (result) => {
+    console.log("🔑 再生機能の起動キー:", result.playClipSystemKey);
+  });
 });
 
-console.log("✅ getClipData.js: content script injected on localhost:3000");
-
-// ------------------------------
-// 汎用セーフブリッジ関数
-// ------------------------------
+// ------------------------------------------------------
+// Chrome storage 安全書き込みユーティリティ
+// ------------------------------------------------------
 async function safeSetStorage(data) {
   try {
-    const hasChrome =
-      typeof chrome !== "undefined" &&
-      chrome.storage &&
-      chrome.storage.session;
-
-    if (hasChrome) {
-      // ✅ content script or 拡張側 → chrome.storage 直接OK
-      await chrome.storage.session.set(data);
-      console.log("💾 [EXT] chrome.storage.session.set:", data);
-    } else {
-      // ❌ ページ側だった場合（理論上ここは来ない）
-      window.postMessage(
-        { type: "EXT/SET_SESSION", payload: data },
-        "*"
-      );
-      console.warn("⚠️ chrome.storage not available, re-posted:", data);
-    }
+    // 直接 local に書き込む（localhostでも確実に動く）
+    await chrome.storage.local.set(data);
+    console.log("✅ [EXT] chrome.storage.local.set:", data);
   } catch (err) {
-    console.error("❌ safeSetStorage failed:", err);
+    console.warn("⚠️ safeSetStorage direct failed:", err);
+    if (chrome.runtime?.id) {
+      console.log("➡️ Fallback to background relay");
+      await chrome.runtime.sendMessage({ type: "SET_SESSION_DATA", payload: data });
+    } else {
+      console.log("➡️ Fallback to window.localStorage");
+      localStorage.setItem("ext_fallback", JSON.stringify(data));
+    }
   }
 }
 
-// ------------------------------
+// ------------------------------------------------------
 // window.postMessage 受信ハンドラ
-// ------------------------------
+// ------------------------------------------------------
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
   const msg = event.data;
 
-  // ---- クリップデータの受信 ----
+  // ---- クリップデータ受信 ----
   if (msg.type === "SET_CLIP_DATA") {
     const { clip, playClipSystemKey } = msg.payload;
     await chrome.storage.local.set({ clip, playClipSystemKey });
-    console.log("🎬 clipデータを保存:", clip, playClipSystemKey);
+    console.log("🎞️ clipデータを保存:", clip, playClipSystemKey);
   }
 
   // ---- プレイリスト再生開始 ----
-
   if (msg.type === "PLAY_PLAYLIST_START") {
     console.log("🎬 PLAY_PLAYLIST_START 受信");
 
+    // localStorage から playQueue を取得
     const stored = localStorage.getItem("playQueue");
     const queue = stored ? JSON.parse(stored) : null;
-    if (!queue) return console.warn("⚠️ プレイキューが空です");
+
+    if (!queue || !Array.isArray(queue) || queue.length === 0) {
+      console.warn("⚠️ プレイキューが空です");
+      return;
+    }
+
+    console.log("🧩 プレイキュー全体:", queue);
+
+    // 🎯 playQueue 全体を拡張ストレージに保存（別ドメインからも参照可能に）
+    await chrome.storage.local.set({ playQueue: queue });
+    console.log("💾 playQueue 全体を chrome.storage.local に保存しました");
 
     playQueue(queue);
   }
-  
 
   // ---- 外部から直接ストレージ設定 ----
   if (msg.type === "EXT/SET_SESSION") {
@@ -80,9 +90,9 @@ window.addEventListener("message", async (event) => {
   }
 });
 
-// ------------------------------
+// ------------------------------------------------------
 // Cookie取得ユーティリティ
-// ------------------------------
+// ------------------------------------------------------
 function getCookies() {
   const cookies = document.cookie.split("; ");
   const cookieObj = {};
@@ -93,30 +103,31 @@ function getCookies() {
   return cookieObj;
 }
 
-// ------------------------------
+// ------------------------------------------------------
 // プレイキュー再生ロジック
-// ------------------------------
+// ------------------------------------------------------
 async function playQueue(queue) {
   console.log("▶️ Playing queue:", queue);
 
   if (!Array.isArray(queue) || queue.length === 0) {
-    return console.warn("⚠️ キューが空です");
+    console.warn("⚠️ キューが空です");
+    return;
   }
 
+  // orderが最も小さい要素を選択
   const nextClip = queue.reduce((min, item) =>
     item.order < min.order ? item : min
   );
 
-  console.log("Next clip to play:", nextClip);
+  console.log("🎯 Next clip to play:", nextClip);
 
   const service = nextClip.service?.toLowerCase();
   const startTime = Math.floor(nextClip.startTime) || 0;
 
   let url = "";
-
   switch (service) {
     case "netflix": {
-      console.log("Netflixのクリップを再生します");
+      console.log("📺 Netflix のクリップを再生します");
       const base = nextClip.url.startsWith("http")
         ? nextClip.url
         : `https://www.netflix.com${nextClip.url}`;
@@ -124,30 +135,27 @@ async function playQueue(queue) {
       break;
     }
     case "prime":
-      console.log("Primeは現在未対応です");
+      console.log("📺 Prime は現在未対応です");
       return;
     default:
-      console.warn("対応していないサービス:", service);
+      console.warn("⚠️ 未対応のサービス:", service);
       return;
   }
 
-  // 🎯 安全に保存してから遷移
+  // 🎯 再生情報を保存（playmode/nextClip）
   try {
     await safeSetStorage({ playmode: "playlist", nextClip });
     console.log("✅ 再生情報を保存しました:", nextClip);
   } catch (err) {
-    console.error("⚠️ safeSetStorage 失敗:", err);
+    console.error("❌ safeSetStorage 失敗:", err);
   }
 
   if (!url) return console.warn("⚠️ URL が無効のため遷移をスキップ");
 
+  // 遷移（遅延で確実にstorage書き込み完了後）
   setTimeout(() => {
-    window.location.href = url;
+　　chrome.storage.local.set({ playlistSystemKey: 1 });
+    console.log("🌐 Navigating to:", url);
+    window.location.href = url; 
   }, 300);
 }
-
-// ------------------------------
-// デバッグ用（現在の文脈確認）
-// ------------------------------
-console.log("📍 location:", location.href);
-console.log("📦 chrome.storage available:", typeof chrome?.storage);

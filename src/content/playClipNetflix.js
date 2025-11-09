@@ -439,27 +439,49 @@ import { getApiEndpoint } from './../api.js';
   // ---------------------------------------------------------------------------
   // 終了時間を監視し、達したらvideoを停止・イベント解除・リロード
   // ---------------------------------------------------------------------------
-  function monitorClipEnd(end,start) {
-    function onTimeUpdate() {
-      if (videoPlayer.currentTime + EPSILON >= end) {
-        console.info('[Clip] Reached end, pausing and reloading.');
-        videoPlayer.removeEventListener('timeupdate', onTimeUpdate);
+// ---------------------------------------------------------------------------
+// 終了時間を監視し、到達したら clip / playlist を次に進める
+// ---------------------------------------------------------------------------
+function monitorClipEnd(end, start) {
+  function onTimeUpdate() {
+    if (videoPlayer.currentTime + EPSILON >= end) {
+      console.info("[Clip] Reached end:", clipData?.title || "unknown");
 
-        clearInterval(countdownIntervalId);
-        //ifで場合分けするbool値で管理
-        // クリップモード終了
-        if (togglekey){
-          console.log("次のClipを再生");
-          playNextClip(); // 次のクリップを再生
-        }else {
-          console.log("クリップ再度再生");
-          chrome.runtime.sendMessage({ type: "seek", sec: start }); 
-          init(); // クリップの最初に戻る
+      videoPlayer.removeEventListener("timeupdate", onTimeUpdate);
+      clearInterval(countdownIntervalId);
+
+      // 現在のモードを確認
+      chrome.storage.local.get(
+        ["playlistSystemKey", "playClipSystemKey", "playQueue", "currentClipOrder"],
+        (res) => {
+          const { playlistSystemKey, playClipSystemKey, playQueue, currentClipOrder } = res;
+
+          if (playlistSystemKey === 1 && Array.isArray(playQueue)) {
+            // 🎬 プレイリスト再生モード
+            console.log("▶️ Playlist mode detected → 次のclipへ");
+            playlistNextClip(playQueue, currentClipOrder ?? 0);
+
+          } else if (playClipSystemKey === 1) {
+            // 🔁 単体clip再生モード
+            console.log("🔁 Single clip mode → リピート再生");
+            chrome.runtime.sendMessage({ type: "seek", sec: start });
+            init(); // 再初期化して先頭から再生
+
+          } else {
+            // ⏸ どちらの再生モードでもない
+            console.log("⏸ 再生モード不明のため停止");
+          }
         }
-      }
+      );
     }
-    videoPlayer.addEventListener('timeupdate', onTimeUpdate);
   }
+
+  // videoタグに監視登録
+  videoPlayer.addEventListener("timeupdate", onTimeUpdate);
+  console.log("👁️‍🗨️ 時間監視を開始:", end);
+}
+
+
   // ---------------------------------------------------------------------------
   //毎秒、残り時間をログ出力する（開発・デバッグ用）
   // ---------------------------------------------------------------------------
@@ -483,42 +505,90 @@ import { getApiEndpoint } from './../api.js';
     isScriptReloading = true;
     location.reload();
   }
-  // ---------------------------------------------------------------------------
-  // playlist再生モードの起動
-  //-----------------------------------------------------------------------------
-  function activatePlaymode() {
-    console.log("▶️ プレイリスト再生モードを起動します");
-    playQueue(JSON.parse(localStorage.getItem("playQueue") || "[]"));
+ // --------------------------------------------------
+// プレイリストモードの起動
+// --------------------------------------------------
+function startPlaylistMode() {
+  console.log("▶️ プレイリスト再生モードを起動します");
 
-  }
-  window.addEventListener('beforeunload', (event) => {
-  if (!isScriptReloading) {
-    console.log('ユーザー操作など、スクリプト以外による再読み込みまたはページ遷移');
-    // ここでスクリプト以外による再読み込み時の処理を行う
-    chrome.storage.local.set({ playClipSystemKey: 0 }, () => {
-      console.log("playClipSystemKeyを0に設定しました。");
-    });
-  } else {
-    console.log('スクリプトによる再読み込み');
-    // スクリプトによる再読み込み後の処理が必要な場合は、
-    // localStorage や sessionStorage にフラグを保存し、
-    // load イベントなどで確認する方法を検討してください。
-    isScriptReloading = false; // フラグをリセット
-  }
+  chrome.storage.local.get(["playQueue", "currentClipOrder"], async ({ playQueue, currentClipOrder }) => {
+    if (!Array.isArray(playQueue) || playQueue.length === 0) {
+      console.warn("⚠️ playQueue が存在しません");
+      return;
+    }
+
+    playQueue.sort((a, b) => a.order - b.order);
+    const order = Number.isInteger(currentClipOrder) ? currentClipOrder : 0;
+    const currentClip = playQueue.find(c => c.order === order);
+
+    if (!currentClip) {
+      console.warn("⚠️ 該当clipが見つかりません:", order);
+      return;
+    }
+
+    console.log("🎬 現在clip:", currentClip);
+    clipData = {
+      starttime: currentClip.startTime,
+      endtime: currentClip.endTime,
+      title: currentClip.clipname,
+    };
+
+    videoPlayer = await waitForVideoElement();
+    setupPlayer(); // ← 同じ監視ロジックに統一
   });
+}
+
+
+// --------------------------------------------------
+// 次のクリップへ遷移
+// --------------------------------------------------
+function playlistNextClip(playQueue, currentOrder) {
+  console.log("▶️ playlistNextClip: 現在のorder =", currentOrder);
+
+  const next = playQueue.find(c => c.order === currentOrder + 1);
+  if (!next) {
+    console.log("🏁 プレイリスト再生終了");
+    chrome.storage.local.set({ playlistSystemKey: 0 });
+    return;
+  }
+
+  console.log("🎬 次のclipを再生:", next);
+
+  // 現在の進行状態を保存
+  chrome.storage.local.set({
+    currentClipOrder: next.order,
+    currentClipId: next.id,
+  });
+
+  // 次のURLに遷移
+  const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
+  console.log("🌐 次clipへ移動:", url);
+  window.location.href = url;
+}
+
   // ---------------------------------------------------------------------------
   // ページの読み込みが完了したらinit()を実行
   // ---------------------------------------------------------------------------
-  window.addEventListener("load", async () => {
-    const { playmode } = await chrome.storage.session.get("playmode");
-    await chrome.storage.session.remove("playmode");
+window.addEventListener("load", async () => {
+  chrome.storage.local.get(
+    ["playClipSystemKey", "playlistSystemKey"],
+    async (result) => {
+      const { playClipSystemKey, playlistSystemKey } = result;
+      console.log("再生機能の起動キー:", playClipSystemKey);
+      console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
 
-    switch (playmode) {
-      case "playlist":
-        activatePlaymode();
-        break;
-      default:
-        init();
-    } 
-  });
+      if (playlistSystemKey === 1) {
+        console.log("▶️ プレイリスト再生モード起動");
+        await startPlaylistMode();
+      } else if (playClipSystemKey === 1) {
+        console.log("🎬 単体Clip再生モード起動");
+        await init();
+      } else {
+        console.log("⏸ 再生機能は未活性、待機状態");
+      }
+    }
+  );
+});
 })();
+
+
