@@ -577,6 +577,9 @@ window.addEventListener("load", async () => {
       console.log("再生機能の起動キー:", playClipSystemKey);
       console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
 
+      chrome.storage.local.set({ currentClipOrder: 0 }, () => {
+        console.log("🧭 currentClipOrder 初期化完了");
+      });
       if (playlistSystemKey === 1) {
         console.log("▶️ プレイリスト再生モード起動");
         await startPlaylistMode();
