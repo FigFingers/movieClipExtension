@@ -4,33 +4,36 @@ import { getApiEndpoint } from './../api.js';
   'use strict';
 
   // ---------------------------------------------------------------------------
-  // グローバル変数の定義
+  // グローバル変数
   // ---------------------------------------------------------------------------
-  let videoPlayer = null;   // <video> element reference
-  let clipData    = null;   // { starttime, endtime, name, title, username }
-  let isScriptReloading = false;// スクリプトによるリロードフラグ
+  let videoPlayer = null;            // <video> element
+  let clipData    = null;            // { startTime, endTime, title, ... }
+  let isScriptReloading = false;     // スクリプト起因のリロード検知
 
-  // End-time detection tolerance (seconds)
   const EPSILON = 0.05;
   let countdownIntervalId = null;
 
   const BUTTON_ID = "nf-loop-toggle-btn";
   const NEXT_BUTTON_ID = "nf-next-clip-btn";
   const SIDEBAR_ID = "nf-memo-sidebar";
-  const SIDEBAR_PCT = 30; // サイドバーの幅（%）
-  const SELECTOR_STANDARD = '[data-uia="controls-standard"]';
-  const SELECTOR_EPISODE = '[data-uia="control-episodes"]';
-  const SELECTOR_FWD10 = '[data-uia="control-forward10"]';
-  const SELECTOR_SUBTITLE = '[data-uia="control-audio-subtitle"]';
-    
+  const SIDEBAR_PCT = 30;
+
+  const SELECTOR_STANDARD  = '[data-uia="controls-standard"]';
+  const SELECTOR_EPISODE   = '[data-uia="control-episodes"]';
+  const SELECTOR_FWD10     = '[data-uia="control-forward10"]';
+  const SELECTOR_SUBTITLE  = '[data-uia="control-audio-subtitle"]';
 
   const COLOR_DEFAULT = window.COLOR_DETAIL_DEFAULT || "#FFFFFF";
-  const COLOR_LOOPING = window.COLOR_DETAIL_ACTIVE || "#FF0000";
+  const COLOR_LOOPING = window.COLOR_DETAIL_ACTIVE  || "#FF0000";
   let isLooping = false;
-  let togglekey = false; // 次のClipを再生するかどうかのトグル状態
+  let togglekey = false;
 
-  chrome.runtime.sendMessage({ type: "nf:init-bridge" });
+  // 起動時のメッセージ送信（受け側未起動対策として try/catch）
+  try { chrome.runtime.sendMessage({ type: "nf:init-bridge" }); } catch(e) { /* noop */ }
 
+  // ---------------------------------------------------------------------------
+  // UI生成
+  // ---------------------------------------------------------------------------
   function createLoopButton() {
     const svgIcon = window.createMoreDetailSVG(COLOR_DEFAULT);
     const btn = document.createElement("button");
@@ -43,7 +46,7 @@ import { getApiEndpoint } from './../api.js';
       svgIcon.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
       toggleSidebar();
     });
-    return {btn,svg : svgIcon};
+    return { btn, svg: svgIcon };
   }
 
   function createPlayNextClipButton() {
@@ -54,34 +57,36 @@ import { getApiEndpoint } from './../api.js';
     btn.appendChild(svgIcon);
     btn.style.cursor = "pointer";
     btn.addEventListener("click", () => {
-      togglekey = !togglekey; // トグル状態を切り替え
+      togglekey = !togglekey;
       svgIcon.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
-      console.log("▶️ 次のクリップを再生ボタンがクリックされました");
+      console.log("▶️ 次のクリップを再生トグル:", togglekey);
     });
-    return { btn,svg: svgIcon};
+    return { btn, svg: svgIcon };
   }
 
   const uiObserver = new MutationObserver(() => {
-    const controls = document.querySelector(SELECTOR_STANDARD);
-    const episodeBtn = document.querySelector(SELECTOR_EPISODE);
+    const controls    = document.querySelector(SELECTOR_STANDARD);
+    const episodeBtn  = document.querySelector(SELECTOR_EPISODE);
     const subtitleBtn = document.querySelector(SELECTOR_SUBTITLE);
 
     const loopBtnExists = document.getElementById(BUTTON_ID);
     const nextBtnExists = document.getElementById(NEXT_BUTTON_ID);
 
-    if (controls && episodeBtn && (!loopBtnExists || !nextBtnExists)) {
-      const { btn: loopButton, svg: loopSvg } = createLoopButton();
-      const { btn: playNextClipButton, svg: playSvg } = createPlayNextClipButton();
+    // 重複生成防止：両方無いときだけ生成
+    if (controls && !loopBtnExists && !nextBtnExists && (episodeBtn || subtitleBtn)) {
+      const anchorBtn = episodeBtn || subtitleBtn;
 
-      loopButton.className = episodeBtn.className;
-      playNextClipButton.className = episodeBtn.className;
+      const { btn: loopButton,      svg: loopSvg } = createLoopButton();
+      const { btn: playNextButton,  svg: playSvg } = createPlayNextClipButton();
 
-      // SVGの色を設定（再描画時にも反映）
+      loopButton.className     = anchorBtn.className;
+      playNextButton.className = anchorBtn.className;
+
       loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
       playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
 
       const wrapper = document.createElement("div");
-      wrapper.className = episodeBtn.parentNode.className;
+      wrapper.className = anchorBtn.parentNode.className;
       wrapper.style.display = "flex";
       wrapper.style.alignItems = "center";
       wrapper.style.gap = "0.5rem";
@@ -92,43 +97,13 @@ import { getApiEndpoint } from './../api.js';
 
       wrapper.appendChild(loopButton);
       wrapper.appendChild(separator);
-      wrapper.appendChild(playNextClipButton);
-      episodeBtn.parentNode.after(wrapper);
+      wrapper.appendChild(playNextButton);
+
+      anchorBtn.parentNode.after(wrapper);
 
       const spacer = document.createElement("div");
       spacer.style.minWidth = "3rem";
-      episodeBtn.parentNode.after(spacer);
-    }else if (controls && subtitleBtn && (!loopBtnExists || !nextBtnExists) ){
-      // エピソードボタンが検出されない場合、subtitleボタンの横に配置
-      const { btn: loopButton, svg: loopSvg } = createLoopButton();
-      const { btn: playNextClipButton, svg: playSvg } = createPlayNextClipButton();
-
-      loopButton.className = subtitleBtn.className;
-      playNextClipButton.className = subtitleBtn.className;
-
-      // SVGの色を設定（再描画時にも反映）
-      loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
-      playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
-
-      const wrapper = document.createElement("div");
-      wrapper.className = subtitleBtn.parentNode.className;
-      wrapper.style.display = "flex";
-      wrapper.style.alignItems = "center";
-      wrapper.style.gap = "0.5rem";
-
-      const separator = document.createElement("div");
-      separator.style.width = "1rem";
-      separator.style.height = "100%";
-
-      wrapper.appendChild(loopButton);
-      wrapper.appendChild(separator);
-      wrapper.appendChild(playNextClipButton);
-      subtitleBtn.parentNode.after(wrapper);
-
-      const spacer = document.createElement("div");
-      spacer.style.minWidth = "3rem";
-      subtitleBtn.parentNode.after(spacer);
-      
+      anchorBtn.parentNode.after(spacer);
     }
 
     // プレイヤーUIが消えた時にボタンも消す
@@ -137,12 +112,12 @@ import { getApiEndpoint } from './../api.js';
       document.getElementById(NEXT_BUTTON_ID)?.remove();
     }
   });
-  // 初期化：ページ読み込み時にUIを監視
   uiObserver.observe(document.body, { childList: true, subtree: true });
   window.addEventListener("beforeunload", () => uiObserver.disconnect());
 
-
-  // サイドバーのトグル
+  // ---------------------------------------------------------------------------
+  // サイドバー
+  // ---------------------------------------------------------------------------
   function toggleSidebar() {
     const sb = document.getElementById(SIDEBAR_ID);
     sb ? closeSidebar() : openSidebar();
@@ -190,7 +165,6 @@ import { getApiEndpoint } from './../api.js';
     document.getElementById(SIDEBAR_ID)?.remove();
   }
 
-  // API 取得 → 表示
   async function fetchDataAndRender(container) {
     try {
       const res = await fetch(getApiEndpoint('random10'));
@@ -232,12 +206,13 @@ import { getApiEndpoint } from './../api.js';
     const m = Math.floor(sec / 60);
     return `${m}:${s}`;
   }
-  //Clip選択時の処理
+
+  // ---------------------------------------------------------------------------
+  // Clip選択 → Cookie保存 → サービス別ジャンプ
+  // ---------------------------------------------------------------------------
   async function selectClip(clipId) {
     console.log("Clip selected:", clipId);
-
     const url = `http://localhost:3000/api/fetchClip?id=${encodeURIComponent(clipId)}`;
-
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
@@ -245,169 +220,102 @@ import { getApiEndpoint } from './../api.js';
       const raw = await res.text();
       console.log("Raw response:", raw);
 
-      const clipData = JSON.parse(raw);
-      console.log("取得クリップデータ:", clipData);
+      const data = JSON.parse(raw);
+      console.log("取得クリップデータ:", data);
 
-      setClipDataOnCookies(clipData);  // Cookie保存
-      redirectToClip(clipData);        // リンクにジャンプ
+      setClipDataOnCookies(data);
+      redirectToClip(data);
+
+      // Clipモードで起動することを明示（相互排他）
+      chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
 
     } catch (err) {
       console.error("クリップ選択処理でエラー:", err);
     }
   }
 
-  //Cookieへ保存
   function setClipDataOnCookies(data) {
-    const keys = ["title", "user", "startTime", "endTime", "url", "service"];
+    const keys = ["title", "user", "startTime", "endTime", "url", "service", "clipId", "username"];
+    const secureFlag = location.protocol === "https:" ? "Secure" : "";
     for (const key of keys) {
       if (data[key] !== undefined) {
         const encoded = encodeURIComponent(data[key]);
-        document.cookie = `${key}=${encoded}; path=/; max-age=3600; SameSite=Lax; secure`;
-        console.log(`Cookie set: ${key} = ${encoded}`);
+        document.cookie = `${key}=${encoded}; path=/; max-age=3600; SameSite=Lax; ${secureFlag}`;
       }
     }
   }
-  // ---------------------------------------------------------------------------
-  // 次のClipを再生するための関数
-  // ---------------------------------------------------------------------------
-  async function playNextClip() {
-    // 起動フラグの設定
-    await new Promise(resolve => chrome.storage.local.set({ playClipSystemKey: 1 }, resolve));
 
-    chrome.storage.local.get(["playClipSystemKey"], (result) => {
-      console.log("再生機能の起動キー:", result.playClipSystemKey);
-    });
-
-    // cookieから必要なデータを取得
-    const getCookie = (name) => {
-      const value = document.cookie.match(`(?:^|; )${name}=([^;]*)`);
-      return value ? decodeURIComponent(value[1]) : null;
-    };
-
-    const platform =  "Netflix"; // 仮：cookieから取得、またはデフォルト
-    const currentClipId = getCookie("clipId") || "000000";    // 仮：現在のclipId（任意の方法で埋め込む）
-    const userId = getCookie("username") || "anonymous"; // 仮：ユーザーID
-
-    try {
-      const res = await fetch('http://localhost:3000/api/nextClip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform, currentClipId, userId })
-      });
-
-      if (!res.ok) throw new Error("サーバーエラー");
-
-      const data = await res.json();
-      console.log("次のクリップ情報:", data);
-
-      if (data?.url && typeof data.startTime === 'number') {
-        // クエリパラメータで再生位置を指定して遷移
-        const url = `https://www.netflix.com${data.url}?t=${Math.floor(data.startTime)}`;
-        location.href = url;
-      } else {
-        console.warn("無効なクリップデータ:", data);
-      }
-
-    } catch (err) {
-      console.error("次クリップ取得エラー:", err);
-    }
-  }
-  // ---------------------------------------------------------------------------
-
-  //対象サービスごとにジャンプ
   function redirectToClip({ url, service, startTime }) {
     if (!url || !service) {
       alert("URL または サービス情報が不正です");
       return;
     }
-
     let baseUrl;
     switch (service.toLowerCase()) {
-      case "netflix":
-        baseUrl = `https://www.netflix.com${url}`;
-        break;
-      case "amazon":
-        baseUrl = `https://www.amazon.co.jp${url}`;
-        break;
-      case "youtube":
-        baseUrl = `https://www.youtube.com${url}`;
-        break;
+      case "netflix": baseUrl = `https://www.netflix.com${url}`; break;
+      case "amazon":  baseUrl = `https://www.amazon.co.jp${url}`; break;
+      case "youtube": baseUrl = `https://www.youtube.com${url}`; break;
       default:
         alert(`未対応のサービス: ${service}`);
         return;
     }
-
     const finalUrl = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "t=" + Math.floor(startTime);
-    window.location.assign(finalUrl, "_blank");
+    // 修正：新規タブで開く場合は window.open
+    window.open(finalUrl, "_blank");
     console.log("再生位置付きで開きます:", finalUrl);
   }
 
   // ---------------------------------------------------------------------------
-  // URLに "clip=1" が含まれていない場合は追加し、ページをリロード
-  // 理由：SPAのURL状態管理用フラグとして使用するため
-  // clipDataの判断を行う　別関数化を検討中
+  // Clip再生モード
   // ---------------------------------------------------------------------------
   function ensureClipTagInURL() {
-    //clipdataの有無を取得
     chrome.storage.local.get(["playClipSystemKey"], (result) => {
-    console.log("再生機能の起動キー:", result.playClipSystemKey);
+      console.log("再生機能の起動キー:", result.playClipSystemKey);
     });
-
   }
 
-  // ---------------------------------------------------------------------------
-  // Chrome拡張のローカルストレージからclipデータを読み込む関数
-  // playClipSystemKeyが1かつclipデータが存在する時だけ有効
-  // ---------------------------------------------------------------------------
   function loadClipFromStorage() {
     return new Promise((resolve, reject) => {
       chrome.storage.local.get(['playClipSystemKey', 'clip'], res => {
-        if (chrome.runtime.lastError) {
-          return reject(chrome.runtime.lastError);// 読み取りエラー処理
-        }
-
+        if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
         if (res.playClipSystemKey === 1 && res.clip) {
-          clipData = res.clip;
+          // 統一：camelCase
+          clipData = {
+            startTime: Number(res.clip.startTime ?? res.clip.starttime),
+            endTime:   Number(res.clip.endTime   ?? res.clip.endtime),
+            title:     res.clip.title
+          };
           console.info('[Clip] loaded:', clipData);
-          resolve(); // 読み込み成功
+          resolve();
         } else {
           console.log('[Clip] No clip data or playClipSystemKey is not 1');
+          resolve();
         }
       });
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // Netflixの<video>タグが出現するまで待つ（SPAなので後からDOMに追加される）
-  // DOM変更を監視して、<video>が現れたらresolve
-  // ---------------------------------------------------------------------------
   function waitForVideoElement() {
     return new Promise(resolve => {
       const existing = document.querySelector('video');
       if (existing) return resolve(existing);
-
       const observer = new MutationObserver(() => {
         const v = document.querySelector('video');
-        if (v) {
-          observer.disconnect();
-          resolve(v);
-        }
+        if (v) { observer.disconnect(); resolve(v); }
       });
-
       observer.observe(document.body, { childList: true, subtree: true });
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // メイン処理の開始：URL・clipデータ・video要素の準備ができたら再生処理へ
-  // ---------------------------------------------------------------------------
   async function init() {
-    ensureClipTagInURL();
+    // Clipモードの明示（相互排他）
+    chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
 
+    ensureClipTagInURL();
     try {
       await loadClipFromStorage();
       videoPlayer = await waitForVideoElement();
-      setupPlayer();
+      setupPlayer("clip");                 // ← モードを明示
     } catch (err) {
       console.error('[Clip] Initialization failed:', err);
       return;
@@ -415,79 +323,118 @@ import { getApiEndpoint } from './../api.js';
   }
 
   // ---------------------------------------------------------------------------
-  // videoの再生が始まったら、endtimeまで監視し、到達したら停止・リロード
+  // Playlist再生モード
   // ---------------------------------------------------------------------------
-  function setupPlayer() {
-    const end = Number(clipData.endtime);
-    const start = Number(clipData.starttime);
+  async function startPlaylistMode() {
+    // Playlistモードの明示（相互排他）
+    chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1 });
 
-    if (videoPlayer.readyState >= 1) {
-      monitorClipEnd(end,start);
-      startCountdownLogger(end);
-    } else {
-      videoPlayer.addEventListener('loadedmetadata', () => {
-        monitorClipEnd(end,start);
-        startCountdownLogger(end);
-      });
-    }
-    // エラー発生時のログ出力
-    videoPlayer.addEventListener('error', e => {
-      console.error('[Video] error:', e);
+    console.log("▶️ プレイリスト再生モードを起動します");
+    chrome.storage.local.get(["playQueue", "currentClipOrder"], async ({ playQueue, currentClipOrder }) => {
+      if (!Array.isArray(playQueue) || playQueue.length === 0) {
+        console.warn("⚠️ playQueue が存在しません");
+        return;
+      }
+      playQueue.sort((a, b) => a.order - b.order);
+      const order = Number.isInteger(currentClipOrder) ? currentClipOrder : 0;
+      const currentClip = playQueue.find(c => c.order === order);
+      if (!currentClip) {
+        console.warn("⚠️ 該当clipが見つかりません:", order);
+        return;
+      }
+      console.log("🎬 現在clip:", currentClip);
+      clipData = {
+        startTime: Number(currentClip.startTime ?? currentClip.starttime),
+        endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
+        title:     currentClip.clipname
+      };
+      videoPlayer = await waitForVideoElement();
+      setupPlayer("playlist");             // ← モードを明示
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // 終了時間を監視し、達したらvideoを停止・イベント解除・リロード
-  // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// 終了時間を監視し、到達したら clip / playlist を次に進める
-// ---------------------------------------------------------------------------
-function monitorClipEnd(end, start) {
-  function onTimeUpdate() {
-    if (videoPlayer.currentTime + EPSILON >= end) {
-      console.info("[Clip] Reached end:", clipData?.title || "unknown");
-
-      videoPlayer.removeEventListener("timeupdate", onTimeUpdate);
-      clearInterval(countdownIntervalId);
-
-      // 現在のモードを確認
-      chrome.storage.local.get(
-        ["playlistSystemKey", "playClipSystemKey", "playQueue", "currentClipOrder"],
-        (res) => {
-          const { playlistSystemKey, playClipSystemKey, playQueue, currentClipOrder } = res;
-
-          if (playlistSystemKey === 1 && Array.isArray(playQueue)) {
-            // 🎬 プレイリスト再生モード
-            console.log("▶️ Playlist mode detected → 次のclipへ");
-            playlistNextClip(playQueue, currentClipOrder ?? 0);
-
-          } else if (playClipSystemKey === 1) {
-            // 🔁 単体clip再生モード
-            console.log("🔁 Single clip mode → リピート再生");
-            chrome.runtime.sendMessage({ type: "seek", sec: start });
-            init(); // 再初期化して先頭から再生
-
-          } else {
-            // ⏸ どちらの再生モードでもない
-            console.log("⏸ 再生モード不明のため停止");
-          }
-        }
-      );
+  function playlistNextClip(playQueue, currentOrder) {
+    console.log("▶️ playlistNextClip: 現在のorder =", currentOrder);
+    const next = playQueue.find(c => c.order === currentOrder + 1);
+    if (!next) {
+      console.log("🏁 プレイリスト再生終了");
+      chrome.storage.local.set({ playlistSystemKey: 0 });
+      return;
     }
+    console.log("🎬 次のclipを再生:", next);
+    chrome.storage.local.set({ currentClipOrder: next.order, currentClipId: next.id });
+    const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
+    console.log("🌐 次clipへ移動:", url);
+    window.location.href = url;
   }
 
-  // videoタグに監視登録
-  videoPlayer.addEventListener("timeupdate", onTimeUpdate);
-  console.log("👁️‍🗨️ 時間監視を開始:", end);
-}
-
-
   // ---------------------------------------------------------------------------
-  //毎秒、残り時間をログ出力する（開発・デバッグ用）
+  // 共通：プレイヤー初期化・監視（モードを引数で固定）
   // ---------------------------------------------------------------------------
+  function setupPlayer(mode /* "clip" | "playlist" */) {
+    const end   = Number(clipData?.endTime);
+    const start = Number(clipData?.startTime);
+
+    if (!Number.isFinite(end) || !Number.isFinite(start)) {
+      console.warn("⚠️ clipDataの時間が不正です:", clipData);
+      return;
+    }
+
+    const onReady = () => {
+      monitorClipEnd(end, start, mode);
+      startCountdownLogger(end);
+    };
+
+    if (videoPlayer.readyState >= 1) {
+      onReady();
+    } else {
+      videoPlayer.addEventListener('loadedmetadata', onReady, { once: true });
+    }
+
+    videoPlayer.addEventListener('error', e => console.error('[Video] error:', e));
+  }
+
+  function monitorClipEnd(end, start, mode /* "clip" | "playlist" */) {
+    function onTimeUpdate() {
+      if (videoPlayer.currentTime + EPSILON >= end) {
+        console.info("[Clip] Reached end:", clipData?.title || "unknown");
+        videoPlayer.removeEventListener("timeupdate", onTimeUpdate);
+        clearInterval(countdownIntervalId);
+
+        // ★ 重要：storageを見直さない。モードは上位から固定伝播。
+        if (mode === "playlist") {
+          chrome.storage.local.get(
+            ["playQueue", "currentClipOrder"],
+            (res) => {
+              const { playQueue, currentClipOrder } = res;
+              if (Array.isArray(playQueue)) {
+                playlistNextClip(playQueue, currentClipOrder ?? 0);
+              } else {
+                console.warn("⚠️ playQueue が無効。playlist終了");
+                chrome.storage.local.set({ playlistSystemKey: 0 });
+              }
+            }
+          );
+        } else {
+          // 単体Clipモード：init()再帰はしない。seekのみでループ。
+          try {
+            chrome.runtime.sendMessage({ type: "seek", sec: start });
+          } catch(e) {
+            // 念のため、失敗時はvideo直操作のフォールバック
+            try { videoPlayer.currentTime = start; videoPlayer.play?.(); } catch(_) {}
+          }
+          // 再初期化は不要。監視は loadedmetadata/onReady で再装着済みのため軽量に保つ。
+          monitorClipEnd(end, start, mode); // 軽い再装着（多重登録回避のため上で一旦remove）
+          startCountdownLogger(end);
+        }
+      }
+    }
+    videoPlayer.addEventListener("timeupdate", onTimeUpdate);
+    console.log("👁️‍🗨️ 時間監視を開始:", end, "mode:", mode);
+  }
+
   function startCountdownLogger(end) {
     if (countdownIntervalId !== null) clearInterval(countdownIntervalId);
-
     countdownIntervalId = setInterval(() => {
       if (!videoPlayer) return;
       const remaining = Math.max(0, end - videoPlayer.currentTime);
@@ -495,103 +442,62 @@ function monitorClipEnd(end, start) {
     }, 1000);
   }
 
+  // ---------------------------------------------------------------------------
+  // ページロード時のモード起動（排他保証）
+  // ---------------------------------------------------------------------------
+  window.addEventListener("load", async () => {
+    chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey"], async ({ playClipSystemKey, playlistSystemKey }) => {
+      console.log("再生機能の起動キー:", playClipSystemKey);
+      console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
 
+      if (playClipSystemKey === 1 && playlistSystemKey === 1) {
+        // どちらもONは異常。Clip優先で矯正。
+        console.warn("⚠️ 両モードがON。Clipを優先して矯正します。");
+        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+        await init();
+        return;
+      }
+
+      if (playClipSystemKey === 1) {
+        await init();                   // clipモード起動
+      } else if (playlistSystemKey === 1) {
+        await startPlaylistMode();      // playlistモード起動
+      } else {
+        console.log("⏸ 再生機能は未活性、待機状態");
+      }
+    });
+  });
 
   // ---------------------------------------------------------------------------
-  // リロード周りでのsystem終了処理
-  //-----------------------------------------------------------------------------
-  //リロードイベントのスクリプト
+  // 離脱処理（両モード残留を防止）
+  // ---------------------------------------------------------------------------
+  window.addEventListener("beforeunload", () => {
+
+    // Playlistの進行度リセットは「Playlist動作中ではないときのみ」行う
+    chrome.storage.local.get(["playlistSystemKey"], ({ playlistSystemKey }) => {
+      if (playlistSystemKey !== 1) {
+        chrome.storage.local.set({ currentClipOrder: 0 }, () => {
+          console.log("🧭 currentClipOrder 初期化完了（Playlist動作中ではないため）");
+        });
+      }
+    });
+
+    if (!isScriptReloading) {
+      console.log("ユーザー操作（手動リロード or ページ遷移）検知");
+      // ★ 重要：両方のキーを落とす（残留防止）
+      chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 0 }, () => {
+        console.log("systemKey を 0 に設定しました（両モード）");
+      });
+    } else {
+      console.log("スクリプトによる再読み込み");
+      isScriptReloading = false;
+    }
+  });
+
+  // （必要なら）スクリプト側から明示リロードする場合のラッパ
   function reloadPageFromScript() {
     isScriptReloading = true;
     location.reload();
   }
- // --------------------------------------------------
-// プレイリストモードの起動
-// --------------------------------------------------
-function startPlaylistMode() {
-  console.log("▶️ プレイリスト再生モードを起動します");
 
-  chrome.storage.local.get(["playQueue", "currentClipOrder"], async ({ playQueue, currentClipOrder }) => {
-    if (!Array.isArray(playQueue) || playQueue.length === 0) {
-      console.warn("⚠️ playQueue が存在しません");
-      return;
-    }
-
-    playQueue.sort((a, b) => a.order - b.order);
-    const order = Number.isInteger(currentClipOrder) ? currentClipOrder : 0;
-    const currentClip = playQueue.find(c => c.order === order);
-
-    if (!currentClip) {
-      console.warn("⚠️ 該当clipが見つかりません:", order);
-      return;
-    }
-
-    console.log("🎬 現在clip:", currentClip);
-    clipData = {
-      starttime: currentClip.startTime,
-      endtime: currentClip.endTime,
-      title: currentClip.clipname,
-    };
-
-    videoPlayer = await waitForVideoElement();
-    setupPlayer(); // ← 同じ監視ロジックに統一
-  });
-}
-
-
-// --------------------------------------------------
-// 次のクリップへ遷移
-// --------------------------------------------------
-function playlistNextClip(playQueue, currentOrder) {
-  console.log("▶️ playlistNextClip: 現在のorder =", currentOrder);
-
-  const next = playQueue.find(c => c.order === currentOrder + 1);
-  if (!next) {
-    console.log("🏁 プレイリスト再生終了");
-    chrome.storage.local.set({ playlistSystemKey: 0 });
-    return;
-  }
-
-  console.log("🎬 次のclipを再生:", next);
-
-  // 現在の進行状態を保存
-  chrome.storage.local.set({
-    currentClipOrder: next.order,
-    currentClipId: next.id,
-  });
-
-  // 次のURLに遷移
-  const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
-  console.log("🌐 次clipへ移動:", url);
-  window.location.href = url;
-}
-
-  // ---------------------------------------------------------------------------
-  // ページの読み込みが完了したらinit()を実行
-  // ---------------------------------------------------------------------------
-window.addEventListener("load", async () => {
-  chrome.storage.local.get(
-    ["playClipSystemKey", "playlistSystemKey"],
-    async (result) => {
-      const { playClipSystemKey, playlistSystemKey } = result;
-      console.log("再生機能の起動キー:", playClipSystemKey);
-      console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
-
-      chrome.storage.local.set({ currentClipOrder: 0 }, () => {
-        console.log("🧭 currentClipOrder 初期化完了");
-      });
-      if (playlistSystemKey === 1) {
-        console.log("▶️ プレイリスト再生モード起動");
-        await startPlaylistMode();
-      } else if (playClipSystemKey === 1) {
-        console.log("🎬 単体Clip再生モード起動");
-        await init();
-      } else {
-        console.log("⏸ 再生機能は未活性、待機状態");
-      }
-    }
-  );
-});
 })();
-
-

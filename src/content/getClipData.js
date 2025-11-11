@@ -58,7 +58,9 @@ window.addEventListener("message", async (event) => {
   // ---- クリップデータ受信 ----
   if (msg.type === "SET_CLIP_DATA") {
     const { clip, playClipSystemKey } = msg.payload;
-    await chrome.storage.local.set({ clip, playClipSystemKey });
+    await chrome.storage.local.set({ clip});
+    // clip再生開始時に
+    chrome.storage.local.set({playClipSystemKey: 1,playlistSystemKey: 0});
     console.log("🎞️ clipデータを保存:", clip, playClipSystemKey);
   }
 
@@ -154,7 +156,9 @@ async function playQueue(queue) {
 
   // 遷移（遅延で確実にstorage書き込み完了後）
   setTimeout(() => {
-　　chrome.storage.local.set({ playlistSystemKey: 1 });
+    // playlist再生開始時に
+    chrome.storage.local.set({playClipSystemKey: 0,playlistSystemKey: 1});
+
     console.log("🌐 Navigating to:", url);
     window.location.href = url; 
   }, 300);
