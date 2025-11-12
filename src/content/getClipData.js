@@ -158,6 +158,9 @@ async function playQueue(queue) {
   setTimeout(() => {
     // playlist再生開始時に
     chrome.storage.local.set({playClipSystemKey: 0,playlistSystemKey: 1});
+    chrome.storage.local.set({ currentClipOrder: 0 }, () => {
+      console.log("🧭 currentClipOrder 初期化完了");
+    });
 
     console.log("🌐 Navigating to:", url);
     window.location.href = url; 
