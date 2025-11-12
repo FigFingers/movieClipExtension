@@ -433,12 +433,15 @@ async function playlistNextClip(playQueue, currentOrder) {
   // ---------------------------------------
   // 🧭 遷移前に状態を保存
   // ---------------------------------------
-  await new Promise((resolve) =>
+  await new Promise((resolve) => {
     chrome.storage.local.set(
       { currentClipOrder: next.order, currentClipId: next.id },
-      resolve
-    )
-  );
+      () => {
+        console.log(`💾 currentClipOrder=${next.order} を保存完了`);
+        resolve();
+      }
+    );
+  });
 
   // clipData更新（monitorClipEndで参照される）
   clipData = {
@@ -470,7 +473,7 @@ async function playlistNextClip(playQueue, currentOrder) {
         console.log(`✅ seek成功: ${currentSec}s に到達`);
         break;
       } else {
-        console.warn(`🔁 seek再送: current=${currentSec}s / target=${targetTime}s`);
+        console.log(`🔁 seek再送: current=${currentSec}s / target=${targetTime}s`);
       }
     }
 
@@ -482,6 +485,10 @@ async function playlistNextClip(playQueue, currentOrder) {
     // --------------------------------------------------
     // 異なるURL → ページ遷移（最初のorder更新後）
     // --------------------------------------------------
+    
+    // playlist継続中であることを通知
+    isScriptReloading = true;
+    
     console.log("🌐 異なるURL → ページ遷移を実行");
     const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
     console.log("➡️ 次clipへ移動:", url);
@@ -598,14 +605,6 @@ async function playlistNextClip(playQueue, currentOrder) {
   // ---------------------------------------------------------------------------
   window.addEventListener("beforeunload", () => {
 
-    chrome.storage.local.get(["playlistSystemKey"], ({ playlistSystemKey }) => {
-      if (playlistSystemKey == 1) {
-        chrome.storage.local.set({ currentClipOrder: 0 }, () => {
-          console.log("🧭 currentClipOrder 初期化完了");
-        });
-      }
-    });
-
     if (isPlaylistNavigating) {
       console.log("▶️ playlist ナビ中：beforeunloadでのリセットをスキップ");
       return;
@@ -617,6 +616,13 @@ async function playlistNextClip(playQueue, currentOrder) {
       chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 0 }, () => {
         console.log("systemKey を 0 に設定しました（両モード）");
       });
+      chrome.storage.local.get(["playlistSystemKey"], ({ playlistSystemKey }) => {
+      if (playlistSystemKey == 1) {
+        chrome.storage.local.set({ currentClipOrder: 0 }, () => {
+          console.log("🧭 currentClipOrder 初期化完了");
+        });
+      }
+    });
     } else {
       console.log("スクリプトによる再読み込み");
       isScriptReloading = false;
