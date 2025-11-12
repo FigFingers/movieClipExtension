@@ -3,6 +3,32 @@ import { getApiEndpoint } from './../api.js';
 (() => {
   'use strict';
 
+// --------------------------------------------------
+// 🔰 起動時初期化ガード（モードが有効でなければリセット）
+// --------------------------------------------------
+if (!sessionStorage.getItem("nfClipInitialized")) {
+  chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey"], (res) => {
+    const clipModeActive = res.playClipSystemKey === 1;
+    const playlistActive = res.playlistSystemKey === 1;
+
+    if (!clipModeActive && !playlistActive) {
+      chrome.storage.local.set({
+        playClipSystemKey: 0,
+        playlistSystemKey: 0,
+        currentClipOrder: 0,
+        clip: null
+      }, () => {
+        console.log("🧹 初期化ガード: 不要データをクリーンアップしました");
+      });
+    } else {
+      console.log("🔄 モード継続中のため、初期化をスキップ");
+    }
+  });
+
+  sessionStorage.setItem("nfClipInitialized", "true");
+}
+
+
   // ---------------------------------------------------------------------------
   // グローバル変数
   // ---------------------------------------------------------------------------
@@ -27,6 +53,24 @@ import { getApiEndpoint } from './../api.js';
   const COLOR_LOOPING = window.COLOR_DETAIL_ACTIVE  || "#FF0000";
   let isLooping = false;
   let togglekey = false;
+
+  // グローバル
+  let isPlaylistNavigating = false;
+
+  // storage.set を await できるユーティリティ
+  function setStorageAsync(data) {
+    return new Promise((resolve) => chrome.storage.local.set(data, resolve));
+  }
+
+  // ループ設定の取得（未設定なら true を既定）
+  function getLoopPlaylist() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(["loopPlaylist"], (res) => {
+        resolve(typeof res.loopPlaylist === "boolean" ? res.loopPlaylist : true);
+      });
+    });
+  }
+
 
   // 起動時のメッセージ送信（受け側未起動対策として try/catch）
   try { chrome.runtime.sendMessage({ type: "nf:init-bridge" }); } catch(e) { /* noop */ }
@@ -353,20 +397,101 @@ import { getApiEndpoint } from './../api.js';
     });
   }
 
-  function playlistNextClip(playQueue, currentOrder) {
-    console.log("▶️ playlistNextClip: 現在のorder =", currentOrder);
-    const next = playQueue.find(c => c.order === currentOrder + 1);
-    if (!next) {
-      console.log("🏁 プレイリスト再生終了");
-      chrome.storage.local.set({ playlistSystemKey: 0 });
-      return;
-    }
-    console.log("🎬 次のclipを再生:", next);
-    chrome.storage.local.set({ currentClipOrder: next.order, currentClipId: next.id });
-    const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
-    console.log("🌐 次clipへ移動:", url);
-    window.location.href = url;
+  // --------------------------------------------------
+  // 次のクリップへ遷移（同URLならseek・別URLなら移行）
+  // 最後のclipでは最初に戻る（ループ再生）
+  // --------------------------------------------------
+  function setStorageAsync(data) {
+    return new Promise((resolve) => chrome.storage.local.set(data, resolve));
   }
+
+  // --------------------------------------------------
+// プレイリスト内で次のclipへ移行
+// （最後なら自動的に order:0 のclipに戻る）
+// --------------------------------------------------
+// --------------------------------------------------
+// 次のクリップへ遷移（同URLなら無限リトライでseek / 異URLなら移行）
+// 最終clipなら自動的に order:0 に戻る
+// --------------------------------------------------
+async function playlistNextClip(playQueue, currentOrder) {
+  console.log("▶️ playlistNextClip: 現在のorder =", currentOrder);
+
+  // 並び順を保証
+  const sortedQueue = [...playQueue].sort((a, b) => a.order - b.order);
+  const currentIndex = sortedQueue.findIndex(c => c.order === currentOrder);
+  if (currentIndex === -1) {
+    console.warn("⚠️ 現在のclipが見つかりません:", currentOrder);
+    return;
+  }
+
+  const current = sortedQueue[currentIndex];
+  const isLast = currentIndex === sortedQueue.length - 1;
+  const next = isLast ? sortedQueue[0] : sortedQueue[currentIndex + 1];
+
+  if (isLast) console.log("🔁 最終clip → order 0 のclipへループ再生します");
+
+  // ---------------------------------------
+  // 🧭 遷移前に状態を保存
+  // ---------------------------------------
+  await new Promise((resolve) =>
+    chrome.storage.local.set(
+      { currentClipOrder: next.order, currentClipId: next.id },
+      resolve
+    )
+  );
+
+  // clipData更新（monitorClipEndで参照される）
+  clipData = {
+    startTime: Number(next.startTime ?? next.starttime),
+    endTime:   Number(next.endTime   ?? next.endtime),
+    title:     next.clipname,
+  };
+
+  // --------------------------------------------------
+  // 🎯 分岐：同じURL内ならseek、異なるURLならページ遷移
+  // --------------------------------------------------
+  if (current.url === next.url) {
+    console.log("🔁 同じURL内のclipに移動 → seek使用（無限リトライ）");
+
+    const targetTime = Math.floor(next.startTime);
+
+    for (;;) {
+      try {
+        await chrome.runtime.sendMessage({ type: "seek", sec: targetTime });
+      } catch (err) {
+        console.warn("⚠️ seekメッセージ送信失敗:", err);
+      }
+
+      // Netflix側が反映するまで待機（0.3秒間隔）
+      await new Promise(r => setTimeout(r, 300));
+
+      const currentSec = Math.floor(videoPlayer?.currentTime ?? 0);
+      if (Math.abs(currentSec - targetTime) <= 1) {
+        console.log(`✅ seek成功: ${currentSec}s に到達`);
+        break;
+      } else {
+        console.warn(`🔁 seek再送: current=${currentSec}s / target=${targetTime}s`);
+      }
+    }
+
+    // 成功後、再監視をセット
+    monitorClipEnd(clipData.endTime, clipData.startTime, "playlist");
+    startCountdownLogger(clipData.endTime);
+
+  } else {
+    // --------------------------------------------------
+    // 異なるURL → ページ遷移（最初のorder更新後）
+    // --------------------------------------------------
+    console.log("🌐 異なるURL → ページ遷移を実行");
+    const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
+    console.log("➡️ 次clipへ移動:", url);
+
+    // storage.set完了を確実にしてから移行（少し遅延）
+    setTimeout(() => {
+      window.location.href = url;
+    }, 150);
+  }
+}
 
   // ---------------------------------------------------------------------------
   // 共通：プレイヤー初期化・監視（モードを引数で固定）
@@ -473,14 +598,18 @@ import { getApiEndpoint } from './../api.js';
   // ---------------------------------------------------------------------------
   window.addEventListener("beforeunload", () => {
 
-    // Playlistの進行度リセットは「Playlist動作中ではないときのみ」行う
     chrome.storage.local.get(["playlistSystemKey"], ({ playlistSystemKey }) => {
-      if (playlistSystemKey !== 1) {
+      if (playlistSystemKey == 1) {
         chrome.storage.local.set({ currentClipOrder: 0 }, () => {
-          console.log("🧭 currentClipOrder 初期化完了（Playlist動作中ではないため）");
+          console.log("🧭 currentClipOrder 初期化完了");
         });
       }
     });
+
+    if (isPlaylistNavigating) {
+      console.log("▶️ playlist ナビ中：beforeunloadでのリセットをスキップ");
+      return;
+    }
 
     if (!isScriptReloading) {
       console.log("ユーザー操作（手動リロード or ページ遷移）検知");
