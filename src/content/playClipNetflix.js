@@ -54,6 +54,8 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
   let isLooping = false;
   let togglekey = false;
 
+  let uiWarmerInterval = null;
+
   // グローバル
   let isPlaylistNavigating = false;
 
@@ -454,13 +456,14 @@ async function playlistNextClip(playQueue, currentOrder) {
   // 🎯 分岐：同じURL内ならseek、異なるURLならページ遷移
   // --------------------------------------------------
   if (current.url === next.url) {
-    console.log("🔁 同じURL内のclipに移動 → seek使用（無限リトライ）");
-
+    console.log("🔁 同じURL内のclipに移動 → ui seek使用（無限リトライ）");
+    startUIWarmer();//seek成功までUIクリックブースト開始
     const targetTime = Math.floor(next.startTime);
 
     for (;;) {
       try {
         await chrome.runtime.sendMessage({ type: "seek", sec: targetTime });
+        stopUIWarmer();
       } catch (err) {
         console.warn("⚠️ seekメッセージ送信失敗:", err);
       }
@@ -573,6 +576,42 @@ async function playlistNextClip(playQueue, currentOrder) {
       console.log(`[Countdown] ${remaining.toFixed(1)} seconds remaining until end.`);
     }, 1000);
   }
+
+function startUIWarmer() {
+  if (uiWarmerInterval !== null) return;
+
+  uiWarmerInterval = setInterval(() => {
+    // 最も信頼できるターゲット
+    const ui = document.querySelector('[data-uia="controls-standard"]')
+             || document.querySelector('.watch-video--bottom-controls-container')
+             || document.querySelector('.watch-video--player-view'); // fallback
+
+    if (!ui) return;
+
+    const rect = ui.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + 5; // 下側ではなく「上端の透明領域」の方が安定
+
+    ["mousedown","mouseup"].forEach(type => {
+      ui.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+        button: 0,
+        view: window
+      }));
+    });
+
+  }, 800);
+}
+
+function stopUIWarmer() {
+  if (uiWarmerInterval !== null) {
+    clearInterval(uiWarmerInterval);
+    uiWarmerInterval = null;
+  }
+}
 
   // ---------------------------------------------------------------------------
   // ページロード時のモード起動（排他保証）
