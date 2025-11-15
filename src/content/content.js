@@ -267,7 +267,7 @@ import { getApiEndpoint } from './../api.js';
         };
         console.log("保存データ:", enriched);
         sendData(enriched);
-        alert("送信しました！");
+        //alert("送信しました！");
         videoPlayer.play(); // ← ここで再生
         closeBtn.click();
       };
