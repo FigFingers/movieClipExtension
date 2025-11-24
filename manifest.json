@@ -33,6 +33,11 @@
       "js": ["dist/content.js"]
     },
     {
+      "matches": ["https://www.disneyplus.com/*"],
+      "run_at": "document_idle",
+      "js": ["dist/content_disney.js"]
+    },
+    {
       "matches": ["http://localhost:3000/*"],
       "run_at": "document_idle",
       "js": ["src/content/getClipData.js"]
