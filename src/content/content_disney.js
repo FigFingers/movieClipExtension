@@ -190,9 +190,82 @@ function addButton(config, host) {
 
   return container;
 }
+function findRealDPlusVideo() {
+  const videos = Array.from(document.querySelectorAll("video"));
+
+  // 本命条件：duration が Infinity ＆ blob src
+  let real = videos.find(v =>
+    v.duration === Infinity &&
+    typeof v.currentSrc === "string" &&
+    v.currentSrc.startsWith("blob:https://www.disneyplus.com")
+  );
+
+  if (real) return real;
+
+  // fallback: readyState >= 2 の video
+  real = videos.find(v => v.readyState >= 2 && v.duration > 0);
+  if (real) return real;
+
+  // 最悪 video[0]
+  return videos[0] || null;
+}
+function findAllTextNodesDeep(root = document) {
+  const stack = [root];
+  const results = [];
+
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node) continue;
+
+    if (node.nodeType === Node.TEXT_NODE) {
+      results.push(node);
+    }
+
+    if (node.shadowRoot) {
+      stack.push(node.shadowRoot);
+    }
+
+    if (node.childNodes) {
+      for (const child of node.childNodes) {
+        stack.push(child);
+      }
+    }
+  }
+
+  return results;
+}
+
+function findDisneyPlusUITimeAny() {
+  const textNodes = findAllTextNodesDeep();
+  const regex = /^(\d{1,2}:)?\d{1,2}:\d{2}$/;  
+  // 例: "1:23", "12:34", "1:02:03"
+
+  for (const node of textNodes) {
+    const text = node.textContent.trim();
+    if (regex.test(text)) {
+      return text;  // UI で表示されている "00:20" の文字列
+    }
+  }
+  return null;
+}
+
+function parseTimeToSeconds(str) {
+  const parts = str.split(":").map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return NaN;
+}
+
 function myCustomActionLeft() {
-  console.log("左ボタンの本処理を実行！");
-  
+  const raw = findDisneyPlusUITimeAny();
+
+  if (!raw) {
+    console.warn("UI 時刻が見つかりません（セレクタ変更 or UI未表示）");
+    return;
+  }
+
+  console.log("[Disney+] UI 時刻（生テキスト）:", raw);
+  console.log("[Disney+] UI 時刻（秒換算）:", parseTimeToSeconds(raw));
 }
 
 function myCustomActionRight1() {
