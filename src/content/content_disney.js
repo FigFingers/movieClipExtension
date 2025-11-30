@@ -1,3 +1,4 @@
+import { getApiEndpoint } from './../api.js';
 (() => {
   const PLAYER_CONTROLS_SELECTOR = '.controls__footer__wrapper';
   const LEFT_CONTROLS_SELECTORS = [
@@ -245,10 +246,46 @@
   })();
 
 
+  let clickStateLeft = 0;
+  let starttime = null; 
   function myCustomActionLeft() {
-    console.log("左ボタンの本処理を実行！");
-    DPlusTime.log();
+    clickStateLeft++;
 
+    if (clickStateLeft === 1) {
+      starttime = DPlusTime.get()?.currentSeconds;
+      console.log("【1回目】開始時間:", starttime);
+      return;
+    }
+
+    if (clickStateLeft === 2) {
+      const t = DPlusTime.get();
+      const endtime = t?.currentSeconds;
+
+      console.log("【2回目】終了時間:", endtime);
+
+      const urldata = location.href;
+      const title = document.querySelector(".title-bug-container .title-field span")?.textContent.trim() || "";
+      const subtitle = document.querySelector(".title-bug-container .subtitle-field span")?.textContent.trim() || "";
+
+      const clipName = `${title}${subtitle ? `｜${subtitle}` : ""}`;
+
+      console.log("start:", starttime, "end:", endtime);
+      console.log("url:", urldata);
+
+      sendData({
+        clipName: clipName,
+        user: "testUser",
+        service: "disneyplus",
+        StartTime: starttime,   // Netflix 形式に合わせる
+        EndTime: endtime,       // Netflix 形式に合わせる
+        URL: urldata,               // Netflix 形式に合わせる
+        title: title,
+        epnumber: subtitle,
+      });
+
+
+      clickStateLeft = 0;
+    }
   }
 
   function myCustomActionRight1() {
