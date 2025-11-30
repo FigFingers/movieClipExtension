@@ -135,148 +135,129 @@
 
     return host;
   }
+    
+  function addButton(config, host) {
+    // これまでの「button要素にid」をやめて、コンテナにidを付けます
+    let container = document.getElementById(config.id);
 
-function addButton(config, host) {
-  // これまでの「button要素にid」をやめて、コンテナにidを付けます
-  let container = document.getElementById(config.id);
+    if (!container || !host.contains(container)) {
+      if (container && container.parentNode) container.parentNode.removeChild(container);
 
-  if (!container || !host.contains(container)) {
-    if (container && container.parentNode) container.parentNode.removeChild(container);
+      // Disney+ に寄せた構造: [div.button-container(tabindex=0, role="button")] ＞ [button.control] ＋ [span.label]
+      container = document.createElement('div');
+      container.id = config.id;
+      container.className = 'dext-button-container button-container';
+      container.setAttribute('role', 'button');
+      container.tabIndex = 0; // キーボード対応
 
-    // Disney+ に寄せた構造: [div.button-container(tabindex=0, role="button")] ＞ [button.control] ＋ [span.label]
-    container = document.createElement('div');
-    container.id = config.id;
-    container.className = 'dext-button-container button-container';
-    container.setAttribute('role', 'button');
-    container.tabIndex = 0; // キーボード対応
+      // 内側のダミーbutton（Disney+は内側buttonに .control を置いている）
+      const innerBtn = document.createElement('button');
+      innerBtn.className = 'dext-control control';
+      innerBtn.tabIndex = -1;
+      innerBtn.setAttribute('aria-hidden', 'true');
 
-    // 内側のダミーbutton（Disney+は内側buttonに .control を置いている）
-    const innerBtn = document.createElement('button');
-    innerBtn.className = 'dext-control control';
-    innerBtn.tabIndex = -1;
-    innerBtn.setAttribute('aria-hidden', 'true');
+      // ラベル
+      const label = document.createElement('span');
+      label.className = 'dext-button-label';
+      label.textContent = config.label;
 
-    // ラベル
-    const label = document.createElement('span');
-    label.className = 'dext-button-label';
-    label.textContent = config.label;
+      container.append(innerBtn, label);
 
-    container.append(innerBtn, label);
+      // クリック＆キーボードで発火（captureも保険で使用）
+      const onActivate = (e) => {
+        if (typeof config.action === 'function') {
+          config.action();   // ボタンごとに関数を実行
+        }
+        container.classList.toggle('active');
+        e.stopPropagation();                  // 他のハンドラに奪われないように
+      };
 
-    // クリック＆キーボードで発火（captureも保険で使用）
-    const onActivate = (e) => {
-      if (typeof config.action === 'function') {
-        config.action();   // ボタンごとに関数を実行
+      container.addEventListener('click', onActivate, { capture: true });
+      container.addEventListener('pointerdown', (e) => {
+        // 一部サイトはpointerdownで奪うので、先に捕まえておく
+        e.stopPropagation();
+      }, { capture: true });
+
+      container.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onActivate(e);
+        }
+      });
+
+      host.appendChild(container);
+    }
+
+    return container;
+  }
+
+
+  const DPlusTime = (() => {
+
+    function formatTime(sec) {
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = sec % 60;
+
+      return h > 0
+        ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+        : `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    function getThumb() {
+      const el = document.querySelector("progress-bar");
+      return el?.shadowRoot?.querySelector(".progress-bar__thumb") || null;
+    }
+
+    function getTime() {
+      const thumb = getThumb();
+      if (!thumb) return null;
+
+      const current = Number(thumb.getAttribute("aria-valuenow"));
+      const total   = Number(thumb.getAttribute("aria-valuemax"));
+
+      if (!Number.isFinite(current) || !Number.isFinite(total)) return null;
+
+      return {
+        currentSeconds: current,
+        totalSeconds  : total,
+        currentTime   : formatTime(current),
+        totalTime     : formatTime(total),
+        progress      : ((current / total) * 100).toFixed(2) + "%"
+      };
+    }
+
+    function log() {
+      const t = getTime();
+      if (!t) {
+        console.warn("[Disney+] 再生時間を取得できません");
+        return;
       }
-      container.classList.toggle('active');
-      e.stopPropagation();                  // 他のハンドラに奪われないように
+
+      console.table(t);
+    }
+
+    return {
+      get: getTime,
+      log: log
     };
 
-    container.addEventListener('click', onActivate, { capture: true });
-    container.addEventListener('pointerdown', (e) => {
-      // 一部サイトはpointerdownで奪うので、先に捕まえておく
-      e.stopPropagation();
-    }, { capture: true });
+  })();
 
-    container.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        onActivate(e);
-      }
-    });
 
-    host.appendChild(container);
+  function myCustomActionLeft() {
+    console.log("左ボタンの本処理を実行！");
+    DPlusTime.log();
+
   }
 
-  return container;
-}
-function findRealDPlusVideo() {
-  const videos = Array.from(document.querySelectorAll("video"));
-
-  // 本命条件：duration が Infinity ＆ blob src
-  let real = videos.find(v =>
-    v.duration === Infinity &&
-    typeof v.currentSrc === "string" &&
-    v.currentSrc.startsWith("blob:https://www.disneyplus.com")
-  );
-
-  if (real) return real;
-
-  // fallback: readyState >= 2 の video
-  real = videos.find(v => v.readyState >= 2 && v.duration > 0);
-  if (real) return real;
-
-  // 最悪 video[0]
-  return videos[0] || null;
-}
-function findAllTextNodesDeep(root = document) {
-  const stack = [root];
-  const results = [];
-
-  while (stack.length) {
-    const node = stack.pop();
-    if (!node) continue;
-
-    if (node.nodeType === Node.TEXT_NODE) {
-      results.push(node);
-    }
-
-    if (node.shadowRoot) {
-      stack.push(node.shadowRoot);
-    }
-
-    if (node.childNodes) {
-      for (const child of node.childNodes) {
-        stack.push(child);
-      }
-    }
+  function myCustomActionRight1() {
+    console.log("右ボタン1の本処理を実行！");
   }
 
-  return results;
-}
-
-function findDisneyPlusUITimeAny() {
-  const textNodes = findAllTextNodesDeep();
-  const regex = /^(\d{1,2}:)?\d{1,2}:\d{2}$/;  
-  // 例: "1:23", "12:34", "1:02:03"
-
-  for (const node of textNodes) {
-    const text = node.textContent.trim();
-    if (regex.test(text)) {
-      return text;  // UI で表示されている "00:20" の文字列
-    }
+  function myCustomActionRight2() {
+    console.log("右ボタン2の本処理を実行！");
   }
-  return null;
-}
-
-function parseTimeToSeconds(str) {
-  const parts = str.split(":").map(Number);
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  return NaN;
-}
-
-function myCustomActionLeft() {
-  const raw = findDisneyPlusUITimeAny();
-
-  if (!raw) {
-    console.warn("UI 時刻が見つかりません（セレクタ変更 or UI未表示）");
-    return;
-  }
-
-  console.log("[Disney+] UI 時刻（生テキスト）:", raw);
-  console.log("[Disney+] UI 時刻（秒換算）:", parseTimeToSeconds(raw));
-}
-
-function myCustomActionRight1() {
-  console.log("右ボタン1の本処理を実行！");
-}
-
-function myCustomActionRight2() {
-  console.log("右ボタン2の本処理を実行！");
-}
-
-
 
   function injectButtons() {
     const controls = document.querySelector(PLAYER_CONTROLS_SELECTOR);
