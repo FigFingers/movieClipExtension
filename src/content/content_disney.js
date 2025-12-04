@@ -1,4 +1,4 @@
-import { getApiEndpoint } from './../api.js';
+import { detectService, openMemoSidebar, sendData } from './common.js';
 (() => {
   const PLAYER_CONTROLS_SELECTOR = '.controls__footer__wrapper';
   const LEFT_CONTROLS_SELECTORS = [
@@ -261,6 +261,9 @@ import { getApiEndpoint } from './../api.js';
       const t = DPlusTime.get();
       const endtime = t?.currentSeconds;
 
+      const videoPlayer = document.querySelector('video');
+      videoPlayer?.pause();
+
       console.log("【2回目】終了時間:", endtime);
 
       const urldata = location.href;
@@ -272,15 +275,22 @@ import { getApiEndpoint } from './../api.js';
       console.log("start:", starttime, "end:", endtime);
       console.log("url:", urldata);
 
-      sendData({
+      const payload = {
         clipName: clipName,
         user: "testUser",
-        service: "disneyplus",
+        service: detectService(),
         StartTime: starttime,   // Netflix 形式に合わせる
         EndTime: endtime,       // Netflix 形式に合わせる
         URL: urldata,               // Netflix 形式に合わせる
         title: title,
         epnumber: subtitle,
+      };
+
+      openMemoSidebar({
+        data: payload,
+        videoPlayer,
+        onSave: (data) => sendData(data),
+        sidebarTitle: "Clipを追加 - Disney+",
       });
 
 
@@ -373,25 +383,6 @@ import { getApiEndpoint } from './../api.js';
 
     window.addEventListener('popstate', dispatch);
   }
-
-  function sendData(dataToSend) {
-      fetch(getApiEndpoint("receive"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(dataToSend),
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          console.log("Success:", data);
-          // ユーザーに成功を通知するUIを追加可能
-        })
-        .catch((error) => {
-          console.error("Error:", error);
-          // ユーザーにエラーを通知するUIを追加可能
-        });
-    }
 
   function bootstrap() {
     hookHistory();
