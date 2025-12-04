@@ -290,7 +290,7 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
         data: payload,
         videoPlayer,
         onSave: (data) => sendData(data),
-        sidebarTitle: "録画メモ",
+        sidebarTitle: "Clipを追加 - Disney+",
       });
 
 

@@ -144,6 +144,7 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
             data,
             videoPlayer,
             onSave: (payload) => sendData(payload),
+            sidebarTitle: "Clipを追加 - Netflix",
           }); // サイドバーを開く
           init();
         } else {
