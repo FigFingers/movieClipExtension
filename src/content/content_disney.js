@@ -388,6 +388,72 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     scheduleInjection();
   }
 
+  //Clip再生機能
+  let startMutation = null;
+  
+  async function init() {
+    console.log("disneyplus content.js init()");
+
+    const { playClipSystemKey, clip } = await chrome.storage.local.get(['playClipSystemKey', 'clip']);
+
+    if (playClipSystemKey !== 1 || !clip) {
+      console.log('[Clip] No clip data or disabled');
+      return null;
+    }
+
+    const clipData = {
+      startTime: Number(clip.startTime ?? clip.starttime),
+      endTime:   Number(clip.endTime   ?? clip.endtime),
+      title:     String(clip.title || '')
+    };
+
+    console.log('[Clip] Playing clip:', clipData);
+    let timer = setInterval(() => {
+      let DplusTimeChecker = DPlusTime.get();
+
+      if (!DplusTimeChecker) {
+        console.log("再生時間を再チェックします...");
+        return;
+      }
+
+      console.log("再生時間を取得しました:", DplusTimeChecker);
+      seekDisney(clipData.startTime);
+      clearInterval(timer); // ← 成功したら停止
+    }, 100);
+
+  }
+
+
+  function seekDisney(seconds) {
+    const t = DPlusTime.get();
+    const bar = document.querySelector("progress-bar");
+    const root = bar?.shadowRoot;
+    const seekable = root?.querySelector(".progress-bar__seekable-range");
+    if (!seekable) return console.warn("seekable-range が見つからない");
+
+    const rect = seekable.getBoundingClientRect();
+    const ratio = seconds / t.totalSeconds;
+
+    // クリック位置を算出
+    const x = rect.left + rect.width * ratio;
+    const y = rect.top + rect.height / 2;
+
+    // イベント発火
+    ["pointerdown", "pointerup"].forEach(type =>
+      seekable.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          clientX: x,
+          clientY: y
+        })
+      )
+    );
+  }
+
+
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', bootstrap, { once: true });
   } else {
@@ -396,4 +462,27 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
 
   window.addEventListener('locationchange', () => scheduleInjection());
   window.addEventListener('load', () => scheduleInjection(), { once: true });
+  window.addEventListener("load", async () => {
+    chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey"], async ({ playClipSystemKey, playlistSystemKey }) => {
+      console.log("再生機能の起動キー:", playClipSystemKey);
+      console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
+
+      if (playClipSystemKey === 1 && playlistSystemKey === 1) {
+        // どちらもONは異常。Clip優先で矯正。
+        console.warn("⚠️ 両モードがON。Clipを優先して矯正します。");
+        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+        await init();
+        return;
+      }
+
+      if (playClipSystemKey === 1) {
+        await init();                   // clipモード起動
+
+      } else if (playlistSystemKey === 1) {
+        //await startPlaylistMode();      // playlistモード起動
+      } else {
+        console.log("⏸ 再生機能は未活性、待機状態");
+      }
+    });
+  });
 })();
