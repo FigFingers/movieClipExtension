@@ -11,8 +11,6 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     '.controls__footer__right',
     '.controls__column--right'
   ];
-  const LEFT_CONTROLS_SELECTOR = LEFT_CONTROLS_SELECTORS[0];
-  const RIGHT_CONTROLS_SELECTOR = RIGHT_CONTROLS_SELECTORS[0];
   const HOST_IDS = {
     left: 'dext-control-host-left',
     right: 'dext-control-host-right'

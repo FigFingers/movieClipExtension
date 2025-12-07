@@ -358,7 +358,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
     // Clipモードの明示（相互排他）
     chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
 
-    ensureClipTagInURL();
+    //ensureClipTagInURL(); 不要コード
     try {
       await loadClipFromStorage();
       videoPlayer = await waitForVideoElement();

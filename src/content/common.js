@@ -6,7 +6,7 @@ export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
   if (host.includes('primevideo.com')) return 'Prime Video';
   if (host.includes('youtube.com')) return 'YouTube';
-  if (host.includes('disneyplus.com')) return 'Disney+';
+  if (host.includes('disneyplus.com')) return 'DisneyPlus';
   if (host.includes('hulu.jp') || host.includes('hulu.com')) return 'Hulu';
   return 'Unknown';
 }
@@ -66,6 +66,7 @@ export function openMemoSidebar({
   header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
   const title = document.createElement('strong');
   title.textContent = sidebarTitle;
+  title.style.color = 'white';
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '×';
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
@@ -80,6 +81,7 @@ export function openMemoSidebar({
 
   const infoBox = document.createElement('div');
   infoBox.style.fontSize = '12px';
+  infoBox.style.color = 'white';
   const start = Math.floor(data?.StartTime || 0);
   const end = Math.floor(data?.EndTime || 0);
   infoBox.innerHTML = `
