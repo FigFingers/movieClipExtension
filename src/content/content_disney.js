@@ -388,17 +388,17 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     scheduleInjection();
   }
 
-  //Clip再生機能
-  let startMutation = null;
-  
   async function init() {
     console.log("disneyplus content.js init()");
 
-    const { playClipSystemKey, clip } = await chrome.storage.local.get(['playClipSystemKey', 'clip']);
+    const { playClipSystemKey, clip } = await chrome.storage.local.get([
+      'playClipSystemKey',
+      'clip'
+    ]);
 
     if (playClipSystemKey !== 1 || !clip) {
       console.log('[Clip] No clip data or disabled');
-      return null;
+      return;
     }
 
     const clipData = {
@@ -408,21 +408,48 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     };
 
     console.log('[Clip] Playing clip:', clipData);
-    let timer = setInterval(() => {
-      let DplusTimeChecker = DPlusTime.get();
 
-      if (!DplusTimeChecker) {
+    // ① 再生開始位置へ移動（成功するまで再試行）
+    const startTimer = setInterval(() => {
+      const t = DPlusTime.get();
+      if (!t) {
         console.log("再生時間を再チェックします...");
         return;
       }
 
-      console.log("再生時間を取得しました:", DplusTimeChecker);
+      console.log("再生時間を取得:", t);
       seekDisney(clipData.startTime);
-      clearInterval(timer); // ← 成功したら停止
-    }, 100);
 
+      clearInterval(startTimer);
+
+      console.log("[Clip] Start position reached. Begin end-monitoring.");
+
+      // ② 終了監視を開始
+      startEndMonitor(clipData);
+
+    }, 100);
   }
 
+  /**
+   * endTime に到達したら次の処理へ
+   */
+  function startEndMonitor(clipData) {
+    const endTimer = setInterval(() => {
+      const t = DPlusTime.get();
+      if (!t) return;
+
+      if (t.currentSeconds >= clipData.endTime) {
+        console.log("[Clip] End reached:", t.currentSeconds, "/", clipData.endTime);
+
+        clearInterval(endTimer);
+
+        // ★ここで次のクリップへ行く or clip 終了 or playlist ロジック
+        // 今回は「init を再実行するタイプ」なら以下
+        init(); // ← ループ動作
+      }
+
+    }, 500); // 1秒で十分
+  }
 
   function seekDisney(seconds) {
     const t = DPlusTime.get();
