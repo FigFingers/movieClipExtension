@@ -80,8 +80,9 @@ window.addEventListener("message", async (event) => {
     console.log("🧩 プレイキュー全体:", queue);
 
     // 🎯 playQueue 全体を拡張ストレージに保存（別ドメインからも参照可能に）
-    await chrome.storage.local.set({ playQueue: queue });
-    console.log("💾 playQueue 全体を chrome.storage.local に保存しました");
+    // playlist モードのコンテンツスクリプトは "playlist" キーを参照するため、両方に保存する
+    await chrome.storage.local.set({ playQueue: queue, playlist: queue });
+    console.log("💾 playQueue/playlist を chrome.storage.local に保存しました");
 
     playQueue(queue);
   }

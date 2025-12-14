@@ -605,23 +605,28 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
   async function initPlaylistMode() {
     clearPlaylistTimers();
 
-    const { playlist } = await chrome.storage.local.get(["playlist"]);
+    const { playlist, playQueue } = await chrome.storage.local.get(["playlist", "playQueue"]);
+    const effectivePlaylist = Array.isArray(playlist) && playlist.length > 0
+      ? playlist
+      : Array.isArray(playQueue) && playQueue.length > 0
+        ? playQueue
+        : null;
 
-    if (!Array.isArray(playlist) || playlist.length === 0) {
-      console.warn("[Playlist] ⚠️ playlist が空または無効です");
+    if (!effectivePlaylist) {
+      console.warn("[Playlist] ⚠️ playlist/playQueue が空または無効です");
       return;
     }
 
     playlistState = {
       ...playlistState,
-      playlist,
+      playlist: effectivePlaylist,
       currentIndex: 0,
       isRunning: true,
       startTimerId: null,
       endTimerId: null,
     };
 
-    console.log(`[Playlist] 🎬 Disney+ プレイリストモード開始 (全${playlist.length}件)`);
+    console.log(`[Playlist] 🎬 Disney+ プレイリストモード開始 (全${effectivePlaylist.length}件)`);
     startPlaylistClip(0);
   }
 
