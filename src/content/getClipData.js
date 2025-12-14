@@ -136,6 +136,13 @@ async function playQueue(queue) {
       url = `${base}?t=${startTime}`;
       break;
     }
+    case "disneyplus":
+      console.log("disneyplusのクリップを再生します");
+      const dplusBase = nextClip.url.startsWith("http")
+        ? nextClip.url
+        : `https://www.disneyplus.com${nextClip.url}`;
+      url = dplusBase;
+      break;
     case "prime":
       console.log("📺 Prime は現在未対応です");
       return;

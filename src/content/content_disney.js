@@ -525,7 +525,16 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       return;
     }
 
-    console.log(`[Playlist] ▶️ 開始: #${index + 1} ${clip.title || "(no title)"}`);
+    const upcoming = playlistState.playlist[index + 1]
+      ? normalizePlaylistClip(playlistState.playlist[index + 1])
+      : null;
+
+    console.log(`[Playlist] ▶️ 開始: #${index + 1} ${clip.title || "(no title)"} (${clip.startTime}s → ${clip.endTime}s)`);
+    if (upcoming) {
+      console.log(`[Playlist] ⏭️ 次に再生予定: #${index + 2} ${upcoming.title || "(no title)"} (${upcoming.startTime}s → ${upcoming.endTime}s)`);
+    } else {
+      console.log("[Playlist] 🏁 次のクリップはありません（最終クリップ）");
+    }
 
     playlistState.startTimerId = setInterval(() => {
       const t = DPlusTime.get();
@@ -558,12 +567,30 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
   }
 
   function monitorPlaylistClipEnd(clip) {
+    let lastLoggedRemaining = null;
+
     playlistState.endTimerId = setInterval(() => {
       const t = DPlusTime.get();
 
       if (!t) {
         console.log("[Playlist] endTime監視: 再試行します");
         return;
+      }
+
+      const remainingSeconds = Math.max(0, clip.endTime - t.currentSeconds);
+      const remainingWhole = Math.ceil(remainingSeconds);
+      if (lastLoggedRemaining !== remainingWhole) {
+        const nextClip = playlistState.playlist[playlistState.currentIndex + 1]
+          ? normalizePlaylistClip(playlistState.playlist[playlistState.currentIndex + 1])
+          : null;
+        const nextLabel = nextClip
+          ? `#${playlistState.currentIndex + 2} ${nextClip.title || "(no title)"}`
+          : "プレイリスト終了";
+
+        console.log(
+          `[Playlist] ⏳ 再生中 #${playlistState.currentIndex + 1}: ${clip.title || "(no title)"} | 次まであと ${remainingWhole}s (${nextLabel})`
+        );
+        lastLoggedRemaining = remainingWhole;
       }
 
       if (t.currentSeconds >= clip.endTime) {
