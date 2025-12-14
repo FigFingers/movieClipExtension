@@ -28,6 +28,17 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
   let observer = null;
   let injectionScheduled = false;
 
+  // Playlist mode state for Disney+
+  const PLAYLIST_CHECK_INTERVAL_MS = 300;
+  const PLAYLIST_END_CHECK_INTERVAL_MS = 250;
+  let playlistState = {
+    playlist: [],
+    currentIndex: 0,
+    startTimerId: null,
+    endTimerId: null,
+    isRunning: false,
+  };
+
   function ensureStyle() {
   if (document.getElementById(STYLE_ID)) return;
 
@@ -451,6 +462,142 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     }, 500); // 1秒で十分
   }
 
+  function clearPlaylistTimers() {
+    if (playlistState.startTimerId) {
+      clearInterval(playlistState.startTimerId);
+      playlistState.startTimerId = null;
+    }
+
+    if (playlistState.endTimerId) {
+      clearInterval(playlistState.endTimerId);
+      playlistState.endTimerId = null;
+    }
+  }
+
+  function normalizePlaylistClip(raw) {
+    return {
+      id: raw?.id ?? raw?.clipId ?? null,
+      startTime: Number(raw?.startTime ?? raw?.starttime),
+      endTime: Number(raw?.endTime ?? raw?.endtime),
+      title: String(raw?.title || raw?.clipname || ""),
+    };
+  }
+
+  function finalizePlaylist() {
+    clearPlaylistTimers();
+    playlistState.isRunning = false;
+    playlistState.playlist = [];
+    playlistState.currentIndex = 0;
+    chrome.storage.local.set({ playlistSystemKey: 0 }, () => {
+      console.log("[Playlist] ✅ 全クリップの再生が完了しました");
+    });
+  }
+
+  function advancePlaylistClip() {
+    playlistState.currentIndex += 1;
+
+    if (playlistState.currentIndex >= playlistState.playlist.length) {
+      finalizePlaylist();
+      return;
+    }
+
+    startPlaylistClip(playlistState.currentIndex);
+  }
+
+  function startPlaylistClip(index) {
+    if (!playlistState.isRunning || !Array.isArray(playlistState.playlist)) {
+      return;
+    }
+
+    clearPlaylistTimers();
+
+    const clip = normalizePlaylistClip(playlistState.playlist[index]);
+
+    if (!Number.isFinite(clip.startTime) || !Number.isFinite(clip.endTime)) {
+      console.warn("[Playlist] ⚠️ クリップ時間が不正です", clip);
+      advancePlaylistClip();
+      return;
+    }
+
+    if (clip.startTime >= clip.endTime) {
+      console.warn("[Playlist] ⚠️ startTime >= endTime のためスキップします", clip);
+      advancePlaylistClip();
+      return;
+    }
+
+    console.log(`[Playlist] ▶️ 開始: #${index + 1} ${clip.title || "(no title)"}`);
+
+    playlistState.startTimerId = setInterval(() => {
+      const t = DPlusTime.get();
+
+      if (!t) {
+        console.log("[Playlist] 再生位置を取得できません。リトライします…");
+        return;
+      }
+
+      if (Number.isFinite(t.totalSeconds) && clip.startTime >= t.totalSeconds) {
+        console.warn(`⚠️ startTime が総再生時間を超過 (${clip.startTime} >= ${t.totalSeconds})`);
+        clearInterval(playlistState.startTimerId);
+        playlistState.startTimerId = null;
+        advancePlaylistClip();
+        return;
+      }
+
+      if (Number.isFinite(t.totalSeconds) && clip.endTime > t.totalSeconds) {
+        console.warn(`⚠️ endTime が総再生時間を超過 (${clip.endTime} > ${t.totalSeconds})`);
+        clip.endTime = Math.min(clip.endTime, t.totalSeconds);
+      }
+
+      seekDisney(clip.startTime);
+
+      clearInterval(playlistState.startTimerId);
+      playlistState.startTimerId = null;
+
+      monitorPlaylistClipEnd(clip);
+    }, PLAYLIST_CHECK_INTERVAL_MS);
+  }
+
+  function monitorPlaylistClipEnd(clip) {
+    playlistState.endTimerId = setInterval(() => {
+      const t = DPlusTime.get();
+
+      if (!t) {
+        console.log("[Playlist] endTime監視: 再試行します");
+        return;
+      }
+
+      if (t.currentSeconds >= clip.endTime) {
+        console.log(`[Playlist] ⏹️ 終了: ${clip.title || "(no title)"}`);
+        clearInterval(playlistState.endTimerId);
+        playlistState.endTimerId = null;
+        advancePlaylistClip();
+      }
+    }, PLAYLIST_END_CHECK_INTERVAL_MS);
+  }
+
+  async function initPlaylistMode() {
+    clearPlaylistTimers();
+
+    const { playlist } = await chrome.storage.local.get(["playlist"]);
+
+    if (!Array.isArray(playlist) || playlist.length === 0) {
+      console.warn("[Playlist] ⚠️ playlist が空または無効です");
+      return;
+    }
+
+    playlistState = {
+      ...playlistState,
+      playlist,
+      currentIndex: 0,
+      isRunning: true,
+      startTimerId: null,
+      endTimerId: null,
+    };
+
+    console.log(`[Playlist] 🎬 Disney+ プレイリストモード開始 (全${playlist.length}件)`);
+    startPlaylistClip(0);
+  }
+
   function seekDisney(seconds) {
     const t = DPlusTime.get();
     const bar = document.querySelector("progress-bar");
@@ -479,6 +626,8 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     );
   }
 
+  window.addEventListener('beforeunload', () => clearPlaylistTimers());
+
 
 
   if (document.readyState === 'loading') {
@@ -506,7 +655,7 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
         await init();                   // clipモード起動
 
       } else if (playlistSystemKey === 1) {
-        //await startPlaylistMode();      // playlistモード起動
+        await initPlaylistMode();        // playlistモード起動
       } else {
         console.log("⏸ 再生機能は未活性、待機状態");
       }
