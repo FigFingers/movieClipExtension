@@ -427,33 +427,15 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
 
   // === Clip ===
   const Clip = (() => {
-    let activeStopFn = null;
-
     function play(clipData, { onStart, onEnd } = {}) {
-      stop();
-
       if (!clipData) {
         console.log('[Clip] No clip data provided');
-        return () => {};
+        return;
       }
 
       console.log('[Clip] Playing clip:', clipData);
 
-      activeStopFn = startLifecycle(clipData, { onStart, onEnd });
-      return activeStopFn;
-    }
-
-    function stop() {
-      if (typeof activeStopFn === 'function') {
-        activeStopFn();
-      }
-      activeStopFn = null;
-    }
-
-    function startLifecycle(clipData, { onStart, onEnd }) {
-      const timers = { startTimer: null, endTimer: null };
-
-      timers.startTimer = setInterval(() => {
+      const startTimer = setInterval(() => {
         const t = Service.DPlusTime.get();
         if (!t) {
           console.log("再生時間を再チェックします...");
@@ -463,8 +445,7 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
         console.log("再生時間を取得:", t);
         Service.seekDisney(clipData.startTime);
 
-        clearInterval(timers.startTimer);
-        timers.startTimer = null;
+        clearInterval(startTimer);
 
         console.log("[Clip] Start position reached. Begin end-monitoring.");
 
@@ -472,11 +453,9 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
           onStart(clipData);
         }
 
-        timers.endTimer = startEndMonitor(clipData, onEnd);
+        startEndMonitor(clipData, onEnd);
 
       }, 100);
-
-      return () => stopTimers(timers);
     }
 
     /**
@@ -498,107 +477,24 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
         }
 
       }, 500); // 1秒で十分
-
-      return endTimer;
     }
 
-    function stopTimers(timers) {
-      if (timers.startTimer) {
-        clearInterval(timers.startTimer);
-        timers.startTimer = null;
-      }
-
-      if (timers.endTimer) {
-        clearInterval(timers.endTimer);
-        timers.endTimer = null;
-      }
-    }
-
-    return { play, stop };
+    return { play };
   })();
 
   // === Playlist ===
   const Playlist = (() => {
-    const state = {
-      clips: [],
-      index: 0,
-      stopClip: null
-    };
-
-    function loadClips(clips) {
-      state.clips = Array.isArray(clips) ? clips : [];
-      state.index = 0;
-    }
-
-    function currentClip() {
-      return state.clips[state.index] || null;
-    }
-
-    function play(clips, callbacks) {
-      stop();
-      if (clips) {
-        loadClips(clips);
-      }
-
-      const clipData = currentClip();
-      if (!clipData) {
-        console.log('[Playlist] No clips to play');
-        return () => {};
-      }
-
-      state.stopClip = Clip.play(clipData, {
-        onStart: callbacks?.onStart,
-        onEnd: () => handleClipEnd(callbacks)
-      });
-
-      return stop;
-    }
-
-    function handleClipEnd(callbacks) {
-      const endedClip = currentClip();
-
-      if (typeof callbacks?.onEnd === 'function') {
-        callbacks.onEnd(endedClip);
-      }
-
-      const nextClip = advance();
-      if (!nextClip) {
-        stop();
-        return;
-      }
-
-      state.stopClip = Clip.play(nextClip, {
-        onStart: callbacks?.onStart,
-        onEnd: () => handleClipEnd(callbacks)
-      });
-    }
-
-    function advance() {
-      if (state.index + 1 >= state.clips.length) {
-        return null;
-      }
-
-      state.index += 1;
-      return currentClip();
-    }
-
-    function stop() {
-      if (typeof state.stopClip === 'function') {
-        state.stopClip();
-      }
-      state.stopClip = null;
+    function play(clipData, callbacks) {
+      Clip.play(clipData, callbacks);
     }
 
     return {
-      play,
-      stop
+      play
     };
   })();
 
   // === Mode ===
   const Mode = (() => {
-    let stopCurrent = null;
-
     async function loadClipData() {
       const { playClipSystemKey, clip } = await chrome.storage.local.get([
         'playClipSystemKey',
@@ -621,14 +517,22 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       const clipData = await loadClipData();
       if (!clipData) return;
 
-      stopCurrent = Clip.play(clipData);
+      Clip.play(clipData, {
+        onEnd: () => handleClipEnd()
+      });
+    }
+
+    async function handleClipEnd() {
+      await startClipMode();
     }
 
     async function startPlaylistMode() {
       const clipData = await loadClipData();
       if (!clipData) return;
 
-      stopCurrent = Playlist.play([clipData]);
+      Playlist.play(clipData, {
+        onEnd: () => handleClipEnd()
+      });
     }
 
     async function startPreferredMode() {
@@ -658,16 +562,8 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       }
     }
 
-    function stopActiveMode() {
-      if (typeof stopCurrent === 'function') {
-        stopCurrent();
-      }
-      stopCurrent = null;
-    }
-
     function bootstrap() {
       window.addEventListener('load', () => {
-        stopActiveMode();
         startPreferredMode();
       });
     }
