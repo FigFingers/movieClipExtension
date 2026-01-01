@@ -1,4 +1,5 @@
 import { getApiEndpoint } from './../api.js';
+import { MEMO_SIDEBAR_ID } from './common.js';
 
 (() => {
   'use strict';
@@ -41,7 +42,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
 
   const BUTTON_ID = "nf-loop-toggle-btn";
   const NEXT_BUTTON_ID = "nf-next-clip-btn";
-  const SIDEBAR_ID = "nf-memo-sidebar";
+  const SIDEBAR_ID = MEMO_SIDEBAR_ID;
   const SIDEBAR_PCT = 30;
 
   const SELECTOR_STANDARD  = '[data-uia="controls-standard"]';
@@ -357,7 +358,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
     // Clipモードの明示（相互排他）
     chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
 
-    ensureClipTagInURL();
+    //ensureClipTagInURL(); 不要コード
     try {
       await loadClipFromStorage();
       videoPlayer = await waitForVideoElement();
