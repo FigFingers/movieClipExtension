@@ -1,6 +1,7 @@
 import { getApiEndpoint } from './../api.js';
 
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
+export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
 
 export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
@@ -160,4 +161,16 @@ export function openMemoSidebar({
 
   document.body.appendChild(sb);
   return sb;
+}
+
+export function markAutoNavigation(reason = 'auto') {
+  sessionStorage.setItem(AUTO_NAVIGATION_KEY, reason);
+}
+
+export function isAutoNavigation() {
+  return Boolean(sessionStorage.getItem(AUTO_NAVIGATION_KEY));
+}
+
+export function clearAutoNavigation() {
+  sessionStorage.removeItem(AUTO_NAVIGATION_KEY);
 }

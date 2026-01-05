@@ -22,6 +22,7 @@ window.addEventListener("clipSelected", () => {
 
   chrome.storage.local.set({ clip: playClipData });
   chrome.storage.local.set({ playClipSystemKey: 1 });
+  safeSetStorage({ playmode: "clip" });
 
   chrome.storage.local.get(["playClipSystemKey"], (result) => {
     console.log("🔑 再生機能の起動キー:", result.playClipSystemKey);
@@ -59,6 +60,7 @@ window.addEventListener("message", async (event) => {
   if (msg.type === "SET_CLIP_DATA") {
     const { clip, playClipSystemKey } = msg.payload;
     await chrome.storage.local.set({ clip});
+    await safeSetStorage({ playmode: "clip" });
     // clip再生開始時に
     chrome.storage.local.set({playClipSystemKey: 1,playlistSystemKey: 0});
     console.log("🎞️ clipデータを保存:", clip, playClipSystemKey);
@@ -80,7 +82,7 @@ window.addEventListener("message", async (event) => {
     console.log("🧩 プレイキュー全体:", queue);
 
     // 🎯 playQueue 全体を拡張ストレージに保存（別ドメインからも参照可能に）
-    await chrome.storage.local.set({ playQueue: queue });
+    await safeSetStorage({ playQueue: queue, currentClipOrder: 0, playmode: "playlist" });
     console.log("💾 playQueue 全体を chrome.storage.local に保存しました");
 
     playQueue(queue);
@@ -126,6 +128,23 @@ async function playQueue(queue) {
   const service = nextClip.service?.toLowerCase();
   const startTime = Math.floor(nextClip.startTime) || 0;
 
+  function appendStartTimeParam(baseUrl, paramKey) {
+    try {
+      const urlObj = new URL(baseUrl);
+      urlObj.searchParams.set(paramKey, String(startTime));
+      return urlObj.toString();
+    } catch (error) {
+      console.warn("⚠️ URL 解析に失敗しました:", baseUrl, error);
+      return baseUrl;
+    }
+  }
+
+  function notifyUnsupportedService(targetService) {
+    const message = `未対応のサービスです: ${targetService || "unknown"}`;
+    console.warn("⚠️", message);
+    window.alert(`⚠️ ${message}`);
+  }
+
   let url = "";
   switch (service) {
     case "netflix": {
@@ -133,14 +152,47 @@ async function playQueue(queue) {
       const base = nextClip.url.startsWith("http")
         ? nextClip.url
         : `https://www.netflix.com${nextClip.url}`;
-      url = `${base}?t=${startTime}`;
+      url = appendStartTimeParam(base, "t");
       break;
     }
-    case "prime":
-      console.log("📺 Prime は現在未対応です");
-      return;
+    case "prime": {
+      console.log("📺 Prime のクリップを再生します");
+      const base = nextClip.url.startsWith("http")
+        ? nextClip.url
+        : `https://www.primevideo.com${nextClip.url}`;
+      url = appendStartTimeParam(base, "t");
+      break;
+    }
+    case "disney": {
+      console.log("📺 Disney+ のクリップを再生します");
+      const base = nextClip.url.startsWith("http")
+        ? nextClip.url
+        : `https://www.disneyplus.com${nextClip.url}`;
+      url = appendStartTimeParam(base, "t");
+      break;
+    }
+    case "youtube": {
+      console.log("📺 YouTube のクリップを再生します");
+      let base = "";
+      if (nextClip.url.startsWith("http")) {
+        base = nextClip.url;
+      } else if (
+        nextClip.url.startsWith("youtu.be") ||
+        nextClip.url.startsWith("www.youtube.com") ||
+        nextClip.url.startsWith("youtube.com")
+      ) {
+        base = `https://${nextClip.url}`;
+      } else {
+        const normalized = nextClip.url.startsWith("/")
+          ? nextClip.url
+          : `/${nextClip.url}`;
+        base = `https://www.youtube.com${normalized}`;
+      }
+      url = appendStartTimeParam(base, "t");
+      break;
+    }
     default:
-      console.warn("⚠️ 未対応のサービス:", service);
+      notifyUnsupportedService(service);
       return;
   }
 
