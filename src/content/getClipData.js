@@ -22,6 +22,7 @@ window.addEventListener("clipSelected", () => {
 
   chrome.storage.local.set({ clip: playClipData });
   chrome.storage.local.set({ playClipSystemKey: 1 });
+  safeSetStorage({ playmode: "clip" });
 
   chrome.storage.local.get(["playClipSystemKey"], (result) => {
     console.log("🔑 再生機能の起動キー:", result.playClipSystemKey);
@@ -59,6 +60,7 @@ window.addEventListener("message", async (event) => {
   if (msg.type === "SET_CLIP_DATA") {
     const { clip, playClipSystemKey } = msg.payload;
     await chrome.storage.local.set({ clip});
+    await safeSetStorage({ playmode: "clip" });
     // clip再生開始時に
     chrome.storage.local.set({playClipSystemKey: 1,playlistSystemKey: 0});
     console.log("🎞️ clipデータを保存:", clip, playClipSystemKey);
@@ -80,7 +82,7 @@ window.addEventListener("message", async (event) => {
     console.log("🧩 プレイキュー全体:", queue);
 
     // 🎯 playQueue 全体を拡張ストレージに保存（別ドメインからも参照可能に）
-    await chrome.storage.local.set({ playQueue: queue });
+    await safeSetStorage({ playQueue: queue, currentClipOrder: 0, playmode: "playlist" });
     console.log("💾 playQueue 全体を chrome.storage.local に保存しました");
 
     playQueue(queue);

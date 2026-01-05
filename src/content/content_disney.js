@@ -1,5 +1,6 @@
-import { detectService, openMemoSidebar, sendData } from './common.js';
+import { clearAutoNavigation, detectService, isAutoNavigation, openMemoSidebar, sendData } from './common.js';
 (() => {
+  clearAutoNavigation();
   // === UI ===
   const UI = (() => {
     const PLAYER_CONTROLS_SELECTOR = '.controls__footer__wrapper';
@@ -642,24 +643,65 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       const clipData = await loadClipData();
       if (!clipData) return;
 
+      await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0, playmode: "clip" });
       stopCurrent = Playlist.play([clipData], { loop: loopEnabled });
     }
 
+    async function loadPlaylistClip() {
+      const { playQueue, currentClipOrder } = await chrome.storage.local.get([
+        'playQueue',
+        'currentClipOrder'
+      ]);
+
+      if (!Array.isArray(playQueue) || playQueue.length === 0) {
+        console.warn('⚠️ playQueue が存在しません');
+        return null;
+      }
+
+      const order = Number.isInteger(currentClipOrder) ? currentClipOrder : 0;
+      const currentClip = playQueue.find((clip) => clip.order === order) ?? playQueue[0];
+
+      if (!currentClip) {
+        console.warn('⚠️ 該当clipが見つかりません:', order);
+        return null;
+      }
+
+      return {
+        startTime: Number(currentClip.startTime ?? currentClip.starttime),
+        endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
+        title:     String(currentClip.clipname || currentClip.title || '')
+      };
+    }
+
     async function startPlaylistMode() {
-      const clipData = await loadClipData();
+      const clipData = await loadPlaylistClip();
       if (!clipData) return;
 
+      await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
       stopCurrent = Playlist.play([clipData]);
     }
 
     async function startPreferredMode() {
-      const { playClipSystemKey, playlistSystemKey } = await chrome.storage.local.get([
+      const { playClipSystemKey, playlistSystemKey, playmode } = await chrome.storage.local.get([
         'playClipSystemKey',
-        'playlistSystemKey'
+        'playlistSystemKey',
+        'playmode'
       ]);
 
       console.log("再生機能の起動キー:", playClipSystemKey);
       console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
+
+      if (playmode === "playlist") {
+        await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1 });
+        await startPlaylistMode();
+        return;
+      }
+
+      if (playmode === "clip") {
+        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+        await startClipMode();
+        return;
+      }
 
       if (playClipSystemKey === 1 && playlistSystemKey === 1) {
         // どちらもONは異常。Clip優先で矯正。
@@ -726,4 +768,21 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
 
   window.addEventListener('locationchange', () => UI.scheduleInjection());
   window.addEventListener('load', () => UI.scheduleInjection(), { once: true });
+
+  window.addEventListener('beforeunload', () => {
+    if (isAutoNavigation()) {
+      console.log("▶️ 自動遷移検知：beforeunloadでのリセットをスキップ");
+      return;
+    }
+
+    console.log("ユーザー操作（手動リロード or ページ遷移）検知");
+    chrome.storage.local.set({
+      playClipSystemKey: 0,
+      playlistSystemKey: 0,
+      currentClipOrder: 0,
+      playmode: null
+    }, () => {
+      console.log("systemKey を 0 に設定しました（両モード）");
+    });
+  });
 })();
