@@ -16,6 +16,43 @@ export function formatSeconds(seconds = 0) {
   return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
 }
 
+export function decideClipTransition(currentUrl, nextUrl) {
+  return currentUrl === nextUrl ? 'seek' : 'navigate';
+}
+
+export async function handleClipTransition({ currentUrl, nextUrl, onSameUrl, onDifferentUrl }) {
+  const action = decideClipTransition(currentUrl, nextUrl);
+  if (action === 'seek') {
+    return onSameUrl?.();
+  }
+  return onDifferentUrl?.();
+}
+
+export async function requestSeek({ service = detectService(), seconds, adapter, videoElement }) {
+  const targetSeconds = Number(seconds);
+  if (!Number.isFinite(targetSeconds)) {
+    throw new Error(`Invalid seek seconds: ${seconds}`);
+  }
+
+  if (service === 'Netflix') {
+    return chrome.runtime.sendMessage({ type: 'seek', sec: targetSeconds });
+  }
+
+  if (adapter?.seek) {
+    adapter.seek(targetSeconds);
+    return { ok: true };
+  }
+
+  if (videoElement) {
+    videoElement.currentTime = targetSeconds;
+    videoElement.play?.();
+    return { ok: true };
+  }
+
+  console.warn(`[Seek] No handler for service: ${service}`);
+  return { ok: false };
+}
+
 export function sendData(dataToSend) {
   return fetch(getApiEndpoint('receive'), {
     method: 'POST',

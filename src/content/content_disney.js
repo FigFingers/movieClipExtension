@@ -1,4 +1,4 @@
-import { detectService, openMemoSidebar, sendData } from './common.js';
+import { detectService, openMemoSidebar, requestSeek, sendData } from './common.js';
 (() => {
   // === UI ===
   const UI = (() => {
@@ -395,8 +395,9 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
 
     })();
 
-    function seekDisney(seconds) {
+    function seek(seconds) {
       const t = DPlusTime.get();
+      if (!t) return console.warn("再生時間が取得できません");
       const bar = document.querySelector("progress-bar");
       const root = bar?.shadowRoot;
       const seekable = root?.querySelector(".progress-bar__seekable-range");
@@ -423,8 +424,13 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       );
     }
 
-    return { DPlusTime, seekDisney };
+    return { DPlusTime, seek };
   })();
+
+  const playerAdapter = {
+    getTime: () => Service.DPlusTime.get(),
+    seek: (seconds) => Service.seek(seconds)
+  };
 
   // === Clip ===
   const Clip = (() => {
@@ -455,14 +461,18 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       const timers = { startTimer: null, endTimer: null };
 
       timers.startTimer = setInterval(() => {
-        const t = Service.DPlusTime.get();
+        const t = playerAdapter.getTime();
         if (!t) {
           console.log("再生時間を再チェックします...");
           return;
         }
 
         console.log("再生時間を取得:", t);
-        Service.seekDisney(clipData.startTime);
+        requestSeek({
+          service: detectService(),
+          seconds: clipData.startTime,
+          adapter: playerAdapter
+        });
 
         clearInterval(timers.startTimer);
         timers.startTimer = null;
@@ -485,7 +495,7 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
      */
     function startEndMonitor(clipData, onEnd) {
       const endTimer = setInterval(() => {
-        const t = Service.DPlusTime.get();
+        const t = playerAdapter.getTime();
         if (!t) return;
 
         if (t.currentSeconds >= clipData.endTime) {

@@ -1,5 +1,5 @@
 import { getApiEndpoint } from './../api.js';
-import { MEMO_SIDEBAR_ID } from './common.js';
+import { MEMO_SIDEBAR_ID, handleClipTransition, requestSeek } from './common.js';
 
 (() => {
   'use strict';
@@ -456,52 +456,56 @@ async function playlistNextClip(playQueue, currentOrder) {
   // --------------------------------------------------
   // 🎯 分岐：同じURL内ならseek、異なるURLならページ遷移
   // --------------------------------------------------
-  if (current.url === next.url) {
-    console.log("🔁 同じURL内のclipに移動 → ui seek使用（無限リトライ）");
-    startUIWarmer();//seek成功までUIクリックブースト開始
-    const targetTime = Math.floor(next.startTime);
+  await handleClipTransition({
+    currentUrl: current.url,
+    nextUrl: next.url,
+    onSameUrl: async () => {
+      console.log("🔁 同じURL内のclipに移動 → ui seek使用（無限リトライ）");
+      startUIWarmer();//seek成功までUIクリックブースト開始
+      const targetTime = Math.floor(next.startTime);
 
-    for (;;) {
-      try {
-        await chrome.runtime.sendMessage({ type: "seek", sec: targetTime });
-        stopUIWarmer();
-      } catch (err) {
-        console.warn("⚠️ seekメッセージ送信失敗:", err);
+      for (;;) {
+        try {
+          await requestSeek({ service: 'Netflix', seconds: targetTime });
+          stopUIWarmer();
+        } catch (err) {
+          console.warn("⚠️ seekメッセージ送信失敗:", err);
+        }
+
+        // Netflix側が反映するまで待機（0.3秒間隔）
+        await new Promise(r => setTimeout(r, 300));
+
+        const currentSec = Math.floor(videoPlayer?.currentTime ?? 0);
+        if (Math.abs(currentSec - targetTime) <= 1) {
+          console.log(`✅ seek成功: ${currentSec}s に到達`);
+          break;
+        } else {
+          console.log(`🔁 seek再送: current=${currentSec}s / target=${targetTime}s`);
+        }
       }
 
-      // Netflix側が反映するまで待機（0.3秒間隔）
-      await new Promise(r => setTimeout(r, 300));
+      // 成功後、再監視をセット
+      monitorClipEnd(clipData.endTime, clipData.startTime, "playlist");
+      startCountdownLogger(clipData.endTime);
+    },
+    onDifferentUrl: () => {
+      // --------------------------------------------------
+      // 異なるURL → ページ遷移（最初のorder更新後）
+      // --------------------------------------------------
 
-      const currentSec = Math.floor(videoPlayer?.currentTime ?? 0);
-      if (Math.abs(currentSec - targetTime) <= 1) {
-        console.log(`✅ seek成功: ${currentSec}s に到達`);
-        break;
-      } else {
-        console.log(`🔁 seek再送: current=${currentSec}s / target=${targetTime}s`);
-      }
+      // playlist継続中であることを通知
+      isScriptReloading = true;
+
+      console.log("🌐 異なるURL → ページ遷移を実行");
+      const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
+      console.log("➡️ 次clipへ移動:", url);
+
+      // storage.set完了を確実にしてから移行（少し遅延）
+      setTimeout(() => {
+        window.location.href = url;
+      }, 150);
     }
-
-    // 成功後、再監視をセット
-    monitorClipEnd(clipData.endTime, clipData.startTime, "playlist");
-    startCountdownLogger(clipData.endTime);
-
-  } else {
-    // --------------------------------------------------
-    // 異なるURL → ページ遷移（最初のorder更新後）
-    // --------------------------------------------------
-    
-    // playlist継続中であることを通知
-    isScriptReloading = true;
-    
-    console.log("🌐 異なるURL → ページ遷移を実行");
-    const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
-    console.log("➡️ 次clipへ移動:", url);
-
-    // storage.set完了を確実にしてから移行（少し遅延）
-    setTimeout(() => {
-      window.location.href = url;
-    }, 150);
-  }
+  });
 }
 
   // ---------------------------------------------------------------------------
@@ -554,7 +558,7 @@ async function playlistNextClip(playQueue, currentOrder) {
         } else {
           // 単体Clipモード：init()再帰はしない。seekのみでループ。
           try {
-            chrome.runtime.sendMessage({ type: "seek", sec: start });
+            requestSeek({ service: 'Netflix', seconds: start, videoElement: videoPlayer });
           } catch(e) {
             // 念のため、失敗時はvideo直操作のフォールバック
             try { videoPlayer.currentTime = start; videoPlayer.play?.(); } catch(_) {}
