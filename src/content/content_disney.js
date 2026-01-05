@@ -1,5 +1,12 @@
-import { detectService, openMemoSidebar, requestSeek, sendData } from './common.js';
-import { clearAutoNavigation, detectService, isAutoNavigation, openMemoSidebar, sendData } from './common.js';
+import {
+  clearAutoNavigation,
+  detectService,
+  isAutoNavigation,
+  openMemoSidebar,
+  requestSeek,
+  sendData
+} from './common.js';
+
 (() => {
   clearAutoNavigation();
   // === UI ===
