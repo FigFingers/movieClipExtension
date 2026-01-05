@@ -165,12 +165,17 @@ export function openMemoSidebar({
 
 export function markAutoNavigation(reason = 'auto') {
   sessionStorage.setItem(AUTO_NAVIGATION_KEY, reason);
+  localStorage.setItem(AUTO_NAVIGATION_KEY, reason);
 }
 
 export function isAutoNavigation() {
-  return Boolean(sessionStorage.getItem(AUTO_NAVIGATION_KEY));
+  return Boolean(
+    sessionStorage.getItem(AUTO_NAVIGATION_KEY) ||
+      localStorage.getItem(AUTO_NAVIGATION_KEY)
+  );
 }
 
 export function clearAutoNavigation() {
   sessionStorage.removeItem(AUTO_NAVIGATION_KEY);
+  localStorage.removeItem(AUTO_NAVIGATION_KEY);
 }
