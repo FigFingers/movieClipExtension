@@ -519,6 +519,28 @@ import { clearAutoNavigation, detectService, isAutoNavigation, openMemoSidebar, 
     return { play, stop };
   })();
 
+  function normalizeClipData(clip) {
+    if (!clip) return null;
+    return {
+      startTime: Number(clip.startTime ?? clip.starttime),
+      endTime: Number(clip.endTime ?? clip.endtime),
+      title: String(clip.clipname ?? clip.title ?? ''),
+      url: clip.url ?? clip.URL ?? clip.Url ?? ''
+    };
+  }
+
+  function normalizeClipUrl(clip) {
+    return clip?.url ?? clip?.URL ?? clip?.Url ?? '';
+  }
+
+  function buildClipUrl(url, startTime) {
+    if (!url) return '';
+    const base = url.startsWith('http') ? url : new URL(url, location.origin).toString();
+    const target = new URL(base);
+    target.searchParams.set('t', Math.floor(startTime || 0).toString());
+    return target.toString();
+  }
+
   // === Playlist ===
   const Playlist = (() => {
     const state = {
@@ -673,13 +695,113 @@ import { clearAutoNavigation, detectService, isAutoNavigation, openMemoSidebar, 
       };
     }
 
-    async function startPlaylistMode() {
-      const clipData = await loadPlaylistClip();
-      if (!clipData) return;
+async function startPlaylistMode() {
+  stopActiveMode();
 
-      await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
-      stopCurrent = Playlist.play([clipData]);
+  await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
+
+  const { playQueue, currentClipOrder } = await chrome.storage.local.get([
+    'playQueue',
+    'currentClipOrder'
+  ]);
+
+  if (!Array.isArray(playQueue) || playQueue.length === 0) {
+    console.warn('[Playlist] playQueue が存在しません');
+    return;
+  }
+
+  const sortedQueue = [...playQueue].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const fallbackOrder = sortedQueue[0]?.order ?? 0;
+
+  const order = Number.isInteger(currentClipOrder) ? currentClipOrder : fallbackOrder;
+  const currentClip = sortedQueue.find((clip) => clip.order === order) || sortedQueue[0];
+
+  if (!currentClip) {
+    console.warn('[Playlist] 該当clipが見つかりません:', order);
+    return;
+  }
+
+  if (currentClipOrder !== currentClip.order) {
+    await chrome.storage.local.set({ currentClipOrder: currentClip.order });
+  }
+
+  await chrome.storage.local.set({ currentClipId: currentClip.id });
+
+  const clipData = normalizeClipData(currentClip);
+  if (!clipData) return;
+
+  playPlaylistClip(clipData);
+
+  function playPlaylistClip(clipData) {
+    stopCurrent = Clip.play(clipData, {
+      onEnd: handlePlaylistEnd
+    });
+  }
+
+  function handlePlaylistEnd() {
+    chrome.storage.local.get(['playQueue', 'currentClipOrder'], (res) => {
+      const { playQueue, currentClipOrder } = res;
+      if (Array.isArray(playQueue)) {
+        playlistNextClip(playQueue, currentClipOrder ?? fallbackOrder);
+      } else {
+        console.warn('[Playlist] playQueue が無効。playlist終了');
+        chrome.storage.local.set({ playlistSystemKey: 0 });
+      }
+    });
+  }
+
+  async function playlistNextClip(playQueue, currentOrder) {
+    const sortedQueue = [...playQueue].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const currentIndex = sortedQueue.findIndex((clip) => clip.order === currentOrder);
+
+    if (currentIndex === -1) {
+      console.warn('[Playlist] 現在のclipが見つかりません:', currentOrder);
+      return;
     }
+
+    const current = sortedQueue[currentIndex];
+    const isLast = currentIndex === sortedQueue.length - 1;
+
+    // loopEnabled を反映：OFFなら最後で停止、ONなら先頭へ戻る
+    if (isLast && !loopEnabled) {
+      console.log('[Playlist] 最終clip。loop OFF なので停止します');
+      await chrome.storage.local.set({ playlistSystemKey: 0 });
+      stopActiveMode();
+      return;
+    }
+
+    const next = isLast ? sortedQueue[0] : sortedQueue[currentIndex + 1];
+
+    await chrome.storage.local.set({
+      currentClipOrder: next.order ?? 0,
+      currentClipId: next.id
+    });
+
+    const nextClipData = normalizeClipData(next);
+    if (!nextClipData) {
+      console.warn('[Playlist] 次クリップのデータが不正です:', next);
+      return;
+    }
+
+    const currentUrl = normalizeClipUrl(current);
+    const nextUrl = normalizeClipUrl(next);
+
+    if (currentUrl && nextUrl && currentUrl !== nextUrl) {
+      const url = buildClipUrl(nextUrl, nextClipData.startTime);
+      console.log('[Playlist] 異なるURL → ページ遷移:', url);
+      if (!url) return;
+
+      setTimeout(() => {
+        chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
+        window.location.href = url;
+      }, 150);
+      return;
+    }
+
+    playPlaylistClip(nextClipData);
+  }
+}
+
 
     async function startPreferredMode() {
       const { playClipSystemKey, playlistSystemKey, playmode } = await chrome.storage.local.get([
