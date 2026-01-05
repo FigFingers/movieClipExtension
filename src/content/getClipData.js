@@ -163,7 +163,7 @@ async function playQueue(queue) {
       url = appendStartTimeParam(base, "t");
       break;
     }
-    case "disney": {
+    case "disneyplus": {
       console.log("📺 Disney+ のクリップを再生します");
       const base = nextClip.url.startsWith("http")
         ? nextClip.url
