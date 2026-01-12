@@ -7,6 +7,11 @@ import {
   MEMO_SIDEBAR_ID,
   requestSeek
 } from './common.js';
+import { setCookie } from '../util/cookies.js';
+import { buildServiceUrl } from '../util/services.js';
+
+/** @typedef {import('../types/clip').ClipDataProps} ClipDataProps */
+/** @typedef {import('../types/clip').ClipListProps} ClipListProps */
 
 (() => {
   'use strict';
@@ -43,6 +48,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
   // グローバル変数
   // ---------------------------------------------------------------------------
   let videoPlayer = null;            // <video> element
+  /** @type {ClipDataProps | null} */
   let clipData    = null;            // { startTime, endTime, title, ... }
   const EPSILON = 0.05;
   let countdownIntervalId = null;
@@ -218,36 +224,44 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
     document.getElementById(SIDEBAR_ID)?.remove();
   }
 
+  /**
+   * @param {HTMLElement} container
+   * @param {ClipListProps} props
+   */
+  function renderClipList(container, { items, onSelect }) {
+    container.innerHTML = "";
+    for (const item of items) {
+      const entry = document.createElement("div");
+      entry.style.cssText = "border-bottom:1px solid #555;padding:4px 0;";
+      entry.innerHTML = `
+          <div><strong>${item.title}（${item.epnumber}）</strong></div>
+          <div>ユーザー: ${item.user}</div>
+          <div>範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}</div>
+        `;
+      const jumpBtn = document.createElement("button");
+      jumpBtn.textContent = "▶ このClipへジャンプ";
+      jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
+      jumpBtn.onclick = () => {
+        console.log("このclipを選択しました！");
+        onSelect?.(item.id);
+      };
+      entry.appendChild(jumpBtn);
+      container.appendChild(entry);
+    }
+  }
+
   async function fetchDataAndRender(container) {
     try {
       const res = await fetch(getApiEndpoint('random10'));
       const data = await res.json();
+      /** @type {ClipDataProps[]} */
       const items = data.allReceivedData || [];
 
       if (!items.length) {
         container.textContent = "データがありません。";
         return;
       }
-
-      container.innerHTML = "";
-      for (const item of items) {
-        const entry = document.createElement("div");
-        entry.style.cssText = "border-bottom:1px solid #555;padding:4px 0;";
-        entry.innerHTML = `
-          <div><strong>${item.title}（${item.epnumber}）</strong></div>
-          <div>ユーザー: ${item.user}</div>
-          <div>範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}</div>
-        `;
-        const jumpBtn = document.createElement("button");
-        jumpBtn.textContent = "▶ このClipへジャンプ";
-        jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
-        jumpBtn.onclick = () => {
-          console.log("このclipを選択しました！");
-          selectClip(item.id);
-        };
-        entry.appendChild(jumpBtn);
-        container.appendChild(entry);
-      }
+      renderClipList(container, { items, onSelect: (clipId) => selectClip(clipId) });
     } catch (err) {
       container.textContent = "データの取得に失敗しました。";
       console.error("API取得失敗:", err);
@@ -287,13 +301,20 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
     }
   }
 
+  /**
+   * @param {ClipDataProps} data
+   */
   function setClipDataOnCookies(data) {
     const keys = ["title", "user", "startTime", "endTime", "url", "service", "clipId", "username"];
-    const secureFlag = location.protocol === "https:" ? "Secure" : "";
     for (const key of keys) {
       if (data[key] !== undefined) {
         const encoded = encodeURIComponent(data[key]);
-        document.cookie = `${key}=${encoded}; path=/; max-age=3600; SameSite=Lax; ${secureFlag}`;
+        setCookie(key, encoded, {
+          path: "/",
+          maxAge: 3600,
+          sameSite: "Lax",
+          secure: location.protocol === "https:"
+        });
       }
     }
   }
@@ -303,16 +324,11 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
       alert("URL または サービス情報が不正です");
       return;
     }
-    let baseUrl;
-    switch (service.toLowerCase()) {
-      case "netflix": baseUrl = `https://www.netflix.com${url}`; break;
-      case "amazon":  baseUrl = `https://www.amazon.co.jp${url}`; break;
-      case "youtube": baseUrl = `https://www.youtube.com${url}`; break;
-      default:
-        alert(`未対応のサービス: ${service}`);
-        return;
+    const finalUrl = buildServiceUrl(service, url, Math.floor(startTime), "t");
+    if (!finalUrl) {
+      alert(`未対応のサービス: ${service}`);
+      return;
     }
-    const finalUrl = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "t=" + Math.floor(startTime);
     // 修正：新規タブで開く場合は window.open
     window.open(finalUrl, "_blank");
     console.log("再生位置付きで開きます:", finalUrl);
