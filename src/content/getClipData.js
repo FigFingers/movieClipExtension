@@ -9,6 +9,8 @@ console.log("✅ getClipData.js: content script injected on", location.origin);
 console.log("📍 location:", location.href);
 console.log("📦 chrome.storage available:", typeof chrome?.storage);
 
+/** @typedef {import('../types/clip').CacheItem} CacheItem */
+
 // ------------------------------------------------------
 // カスタムイベント監視（clip選択・リスト読み込み）
 // ------------------------------------------------------
@@ -108,8 +110,81 @@ function getCookies() {
 }
 
 // ------------------------------------------------------
+// サービス URL ユーティリティ
+// ------------------------------------------------------
+const SERVICE_BASE_URL = {
+  netflix: "https://www.netflix.com",
+  prime: "https://www.primevideo.com",
+  disneyplus: "https://www.disneyplus.com",
+  youtube: "https://www.youtube.com"
+};
+
+const SERVICE_ALIASES = {
+  "disney+": "disneyplus",
+  disney: "disneyplus",
+  primevideo: "prime",
+  prime_video: "prime",
+  amazonprime: "prime"
+};
+
+function normalizeService(service) {
+  if (!service) return "";
+  const normalized = service.toString().trim().toLowerCase().replace(/\s+/g, "");
+  return SERVICE_ALIASES[normalized] || normalized;
+}
+
+function ensureAbsoluteUrl(rawUrl, baseUrl) {
+  if (!rawUrl) return "";
+  if (rawUrl.startsWith("http")) return rawUrl;
+  const normalized = rawUrl.startsWith("/") ? rawUrl : `/${rawUrl}`;
+  return `${baseUrl}${normalized}`;
+}
+
+function buildYoutubeUrl(rawUrl) {
+  if (!rawUrl) return "";
+  if (rawUrl.startsWith("http")) {
+    return rawUrl;
+  }
+  if (
+    rawUrl.startsWith("youtu.be") ||
+    rawUrl.startsWith("www.youtube.com") ||
+    rawUrl.startsWith("youtube.com")
+  ) {
+    return `https://${rawUrl}`;
+  }
+  const normalized = rawUrl.startsWith("/") ? rawUrl : `/${rawUrl}`;
+  return `${SERVICE_BASE_URL.youtube}${normalized}`;
+}
+
+function appendStartTimeParam(baseUrl, paramKey, startTime) {
+  try {
+    const urlObj = new URL(baseUrl);
+    urlObj.searchParams.set(paramKey, String(startTime));
+    return urlObj.toString();
+  } catch (error) {
+    console.warn("⚠️ URL 解析に失敗しました:", baseUrl, error);
+    return baseUrl;
+  }
+}
+
+function buildServiceUrl(service, rawUrl, startTime, paramKey = "t") {
+  const normalizedService = normalizeService(service);
+  if (normalizedService === "youtube") {
+    const base = buildYoutubeUrl(rawUrl);
+    return appendStartTimeParam(base, paramKey, startTime);
+  }
+  const baseUrl = SERVICE_BASE_URL[normalizedService];
+  if (!baseUrl) return "";
+  const resolved = ensureAbsoluteUrl(rawUrl, baseUrl);
+  return appendStartTimeParam(resolved, paramKey, startTime);
+}
+
+// ------------------------------------------------------
 // プレイキュー再生ロジック
 // ------------------------------------------------------
+/**
+ * @param {CacheItem[]} queue
+ */
 async function playQueue(queue) {
   console.log("▶️ Playing queue:", queue);
 
@@ -119,25 +194,22 @@ async function playQueue(queue) {
   }
 
   // orderが最も小さい要素を選択
+  /** @type {CacheItem} */
   const nextClip = queue.reduce((min, item) =>
     item.order < min.order ? item : min
   );
 
   console.log("🎯 Next clip to play:", nextClip);
 
-  const service = nextClip.service?.toLowerCase();
+  const normalizedService = normalizeService(nextClip.service);
   const startTime = Math.floor(nextClip.startTime) || 0;
 
-  function appendStartTimeParam(baseUrl, paramKey) {
-    try {
-      const urlObj = new URL(baseUrl);
-      urlObj.searchParams.set(paramKey, String(startTime));
-      return urlObj.toString();
-    } catch (error) {
-      console.warn("⚠️ URL 解析に失敗しました:", baseUrl, error);
-      return baseUrl;
-    }
-  }
+  const serviceLogMessages = {
+    netflix: "📺 Netflix のクリップを再生します",
+    prime: "📺 Prime のクリップを再生します",
+    disneyplus: "📺 Disney+ のクリップを再生します",
+    youtube: "📺 YouTube のクリップを再生します"
+  };
 
   function notifyUnsupportedService(targetService) {
     const message = `未対応のサービスです: ${targetService || "unknown"}`;
@@ -145,55 +217,15 @@ async function playQueue(queue) {
     window.alert(`⚠️ ${message}`);
   }
 
-  let url = "";
-  switch (service) {
-    case "netflix": {
-      console.log("📺 Netflix のクリップを再生します");
-      const base = nextClip.url.startsWith("http")
-        ? nextClip.url
-        : `https://www.netflix.com${nextClip.url}`;
-      url = appendStartTimeParam(base, "t");
-      break;
-    }
-    case "prime": {
-      console.log("📺 Prime のクリップを再生します");
-      const base = nextClip.url.startsWith("http")
-        ? nextClip.url
-        : `https://www.primevideo.com${nextClip.url}`;
-      url = appendStartTimeParam(base, "t");
-      break;
-    }
-    case "disneyplus": {
-      console.log("📺 Disney+ のクリップを再生します");
-      const base = nextClip.url.startsWith("http")
-        ? nextClip.url
-        : `https://www.disneyplus.com${nextClip.url}`;
-      url = appendStartTimeParam(base, "t");
-      break;
-    }
-    case "youtube": {
-      console.log("📺 YouTube のクリップを再生します");
-      let base = "";
-      if (nextClip.url.startsWith("http")) {
-        base = nextClip.url;
-      } else if (
-        nextClip.url.startsWith("youtu.be") ||
-        nextClip.url.startsWith("www.youtube.com") ||
-        nextClip.url.startsWith("youtube.com")
-      ) {
-        base = `https://${nextClip.url}`;
-      } else {
-        const normalized = nextClip.url.startsWith("/")
-          ? nextClip.url
-          : `/${nextClip.url}`;
-        base = `https://www.youtube.com${normalized}`;
-      }
-      url = appendStartTimeParam(base, "t");
-      break;
-    }
-    default:
-      notifyUnsupportedService(service);
-      return;
+  const logMessage = serviceLogMessages[normalizedService];
+  if (logMessage) {
+    console.log(logMessage);
+  }
+
+  const url = buildServiceUrl(normalizedService, nextClip.url, startTime, "t");
+  if (!url) {
+    notifyUnsupportedService(normalizedService);
+    return;
   }
 
   // 🎯 再生情報を保存（playmode/nextClip）
