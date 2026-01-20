@@ -1,5 +1,17 @@
 import { getApiEndpoint } from './../api.js';
-import { MEMO_SIDEBAR_ID } from './common.js';
+import {
+  clearAutoNavigation,
+  handleClipTransition,
+  isAutoNavigation,
+  markAutoNavigation,
+  MEMO_SIDEBAR_ID,
+  requestSeek
+} from './common.js';
+import { setCookie } from '../util/cookies.js';
+import { buildServiceUrl } from '../util/services.js';
+
+/** @typedef {import('../types/clip').ClipDataProps} ClipDataProps */
+/** @typedef {import('../types/clip').ClipListProps} ClipListProps */
 
 (() => {
   'use strict';
@@ -8,15 +20,17 @@ import { MEMO_SIDEBAR_ID } from './common.js';
 // 🔰 起動時初期化ガード（モードが有効でなければリセット）
 // --------------------------------------------------
 if (!sessionStorage.getItem("nfClipInitialized")) {
-  chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey"], (res) => {
+  chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey", "playmode"], (res) => {
     const clipModeActive = res.playClipSystemKey === 1;
     const playlistActive = res.playlistSystemKey === 1;
+    const playmodeActive = res.playmode === "clip" || res.playmode === "playlist";
 
-    if (!clipModeActive && !playlistActive) {
+    if (!clipModeActive && !playlistActive && !playmodeActive) {
       chrome.storage.local.set({
         playClipSystemKey: 0,
         playlistSystemKey: 0,
         currentClipOrder: 0,
+        playmode: null,
         clip: null
       }, () => {
         console.log("🧹 初期化ガード: 不要データをクリーンアップしました");
@@ -34,9 +48,8 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
   // グローバル変数
   // ---------------------------------------------------------------------------
   let videoPlayer = null;            // <video> element
+  /** @type {ClipDataProps | null} */
   let clipData    = null;            // { startTime, endTime, title, ... }
-  let isScriptReloading = false;     // スクリプト起因のリロード検知
-
   const EPSILON = 0.05;
   let countdownIntervalId = null;
 
@@ -57,8 +70,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
 
   let uiWarmerInterval = null;
 
-  // グローバル
-  let isPlaylistNavigating = false;
+  clearAutoNavigation();
 
   // storage.set を await できるユーティリティ
   function setStorageAsync(data) {
@@ -212,36 +224,44 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
     document.getElementById(SIDEBAR_ID)?.remove();
   }
 
+  /**
+   * @param {HTMLElement} container
+   * @param {ClipListProps} props
+   */
+  function renderClipList(container, { items, onSelect }) {
+    container.innerHTML = "";
+    for (const item of items) {
+      const entry = document.createElement("div");
+      entry.style.cssText = "border-bottom:1px solid #555;padding:4px 0;";
+      entry.innerHTML = `
+          <div><strong>${item.title}（${item.epnumber}）</strong></div>
+          <div>ユーザー: ${item.user}</div>
+          <div>範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}</div>
+        `;
+      const jumpBtn = document.createElement("button");
+      jumpBtn.textContent = "▶ このClipへジャンプ";
+      jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
+      jumpBtn.onclick = () => {
+        console.log("このclipを選択しました！");
+        onSelect?.(item.id);
+      };
+      entry.appendChild(jumpBtn);
+      container.appendChild(entry);
+    }
+  }
+
   async function fetchDataAndRender(container) {
     try {
       const res = await fetch(getApiEndpoint('random10'));
       const data = await res.json();
+      /** @type {ClipDataProps[]} */
       const items = data.allReceivedData || [];
 
       if (!items.length) {
         container.textContent = "データがありません。";
         return;
       }
-
-      container.innerHTML = "";
-      for (const item of items) {
-        const entry = document.createElement("div");
-        entry.style.cssText = "border-bottom:1px solid #555;padding:4px 0;";
-        entry.innerHTML = `
-          <div><strong>${item.title}（${item.epnumber}）</strong></div>
-          <div>ユーザー: ${item.user}</div>
-          <div>範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}</div>
-        `;
-        const jumpBtn = document.createElement("button");
-        jumpBtn.textContent = "▶ このClipへジャンプ";
-        jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
-        jumpBtn.onclick = () => {
-          console.log("このclipを選択しました！");
-          selectClip(item.id);
-        };
-        entry.appendChild(jumpBtn);
-        container.appendChild(entry);
-      }
+      renderClipList(container, { items, onSelect: (clipId) => selectClip(clipId) });
     } catch (err) {
       container.textContent = "データの取得に失敗しました。";
       console.error("API取得失敗:", err);
@@ -281,13 +301,20 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
     }
   }
 
+  /**
+   * @param {ClipDataProps} data
+   */
   function setClipDataOnCookies(data) {
     const keys = ["title", "user", "startTime", "endTime", "url", "service", "clipId", "username"];
-    const secureFlag = location.protocol === "https:" ? "Secure" : "";
     for (const key of keys) {
       if (data[key] !== undefined) {
         const encoded = encodeURIComponent(data[key]);
-        document.cookie = `${key}=${encoded}; path=/; max-age=3600; SameSite=Lax; ${secureFlag}`;
+        setCookie(key, encoded, {
+          path: "/",
+          maxAge: 3600,
+          sameSite: "Lax",
+          secure: location.protocol === "https:"
+        });
       }
     }
   }
@@ -297,16 +324,11 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
       alert("URL または サービス情報が不正です");
       return;
     }
-    let baseUrl;
-    switch (service.toLowerCase()) {
-      case "netflix": baseUrl = `https://www.netflix.com${url}`; break;
-      case "amazon":  baseUrl = `https://www.amazon.co.jp${url}`; break;
-      case "youtube": baseUrl = `https://www.youtube.com${url}`; break;
-      default:
-        alert(`未対応のサービス: ${service}`);
-        return;
+    const finalUrl = buildServiceUrl(service, url, Math.floor(startTime), "t");
+    if (!finalUrl) {
+      alert(`未対応のサービス: ${service}`);
+      return;
     }
-    const finalUrl = baseUrl + (baseUrl.includes("?") ? "&" : "?") + "t=" + Math.floor(startTime);
     // 修正：新規タブで開く場合は window.open
     window.open(finalUrl, "_blank");
     console.log("再生位置付きで開きます:", finalUrl);
@@ -356,7 +378,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
 
   async function init() {
     // Clipモードの明示（相互排他）
-    chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+    chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0, playmode: "clip" });
 
     //ensureClipTagInURL(); 不要コード
     try {
@@ -374,7 +396,7 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
   // ---------------------------------------------------------------------------
   async function startPlaylistMode() {
     // Playlistモードの明示（相互排他）
-    chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1 });
+    chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
 
     console.log("▶️ プレイリスト再生モードを起動します");
     chrome.storage.local.get(["playQueue", "currentClipOrder"], async ({ playQueue, currentClipOrder }) => {
@@ -456,25 +478,28 @@ async function playlistNextClip(playQueue, currentOrder) {
   // --------------------------------------------------
   // 🎯 分岐：同じURL内ならseek、異なるURLならページ遷移
   // --------------------------------------------------
-  if (current.url === next.url) {
+await handleClipTransition({
+  currentUrl: current.url,
+  nextUrl: next.url,
+
+  onSameUrl: async () => {
     console.log("🔁 同じURL内のclipに移動 → ui seek使用（無限リトライ）");
-    startUIWarmer();//seek成功までUIクリックブースト開始
+    startUIWarmer(); // seek成功までUIクリックブースト開始
     const targetTime = Math.floor(next.startTime);
 
     for (;;) {
       try {
-        await chrome.runtime.sendMessage({ type: "seek", sec: targetTime });
-        stopUIWarmer();
+        await requestSeek({ service: 'Netflix', seconds: targetTime });
       } catch (err) {
         console.warn("⚠️ seekメッセージ送信失敗:", err);
       }
 
-      // Netflix側が反映するまで待機（0.3秒間隔）
       await new Promise(r => setTimeout(r, 300));
 
       const currentSec = Math.floor(videoPlayer?.currentTime ?? 0);
       if (Math.abs(currentSec - targetTime) <= 1) {
         console.log(`✅ seek成功: ${currentSec}s に到達`);
+        stopUIWarmer();
         break;
       } else {
         console.log(`🔁 seek再送: current=${currentSec}s / target=${targetTime}s`);
@@ -484,25 +509,23 @@ async function playlistNextClip(playQueue, currentOrder) {
     // 成功後、再監視をセット
     monitorClipEnd(clipData.endTime, clipData.startTime, "playlist");
     startCountdownLogger(clipData.endTime);
+  },
 
-  } else {
-    // --------------------------------------------------
-    // 異なるURL → ページ遷移（最初のorder更新後）
-    // --------------------------------------------------
-    
-    // playlist継続中であることを通知
-    isScriptReloading = true;
-    
+  onDifferentUrl: () => {
+    // playlist継続中であることを通知（beforeunloadリセット回避）
+    markAutoNavigation("playlist");
+
     console.log("🌐 異なるURL → ページ遷移を実行");
     const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
     console.log("➡️ 次clipへ移動:", url);
 
-    // storage.set完了を確実にしてから移行（少し遅延）
     setTimeout(() => {
       window.location.href = url;
     }, 150);
   }
+});
 }
+
 
   // ---------------------------------------------------------------------------
   // 共通：プレイヤー初期化・監視（モードを引数で固定）
@@ -554,7 +577,7 @@ async function playlistNextClip(playQueue, currentOrder) {
         } else {
           // 単体Clipモード：init()再帰はしない。seekのみでループ。
           try {
-            chrome.runtime.sendMessage({ type: "seek", sec: start });
+            requestSeek({ service: 'Netflix', seconds: start, videoElement: videoPlayer });
           } catch(e) {
             // 念のため、失敗時はvideo直操作のフォールバック
             try { videoPlayer.currentTime = start; videoPlayer.play?.(); } catch(_) {}
@@ -618,9 +641,21 @@ function stopUIWarmer() {
   // ページロード時のモード起動（排他保証）
   // ---------------------------------------------------------------------------
   window.addEventListener("load", async () => {
-    chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey"], async ({ playClipSystemKey, playlistSystemKey }) => {
+    chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey", "playmode"], async ({ playClipSystemKey, playlistSystemKey, playmode }) => {
       console.log("再生機能の起動キー:", playClipSystemKey);
       console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
+
+      if (playmode === "playlist") {
+        await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1 });
+        await startPlaylistMode();
+        return;
+      }
+
+      if (playmode === "clip") {
+        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+        await init();
+        return;
+      }
 
       if (playClipSystemKey === 1 && playlistSystemKey === 1) {
         // どちらもONは異常。Clip優先で矯正。
@@ -645,33 +680,26 @@ function stopUIWarmer() {
   // ---------------------------------------------------------------------------
   window.addEventListener("beforeunload", () => {
 
-    if (isPlaylistNavigating) {
-      console.log("▶️ playlist ナビ中：beforeunloadでのリセットをスキップ");
+    if (isAutoNavigation()) {
+      console.log("▶️ 自動遷移検知：beforeunloadでのリセットをスキップ");
       return;
     }
 
-    if (!isScriptReloading) {
-      console.log("ユーザー操作（手動リロード or ページ遷移）検知");
-      // ★ 重要：両方のキーを落とす（残留防止）
-      chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 0 }, () => {
-        console.log("systemKey を 0 に設定しました（両モード）");
-      });
-      chrome.storage.local.get(["playlistSystemKey"], ({ playlistSystemKey }) => {
-      if (playlistSystemKey == 1) {
-        chrome.storage.local.set({ currentClipOrder: 0 }, () => {
-          console.log("🧭 currentClipOrder 初期化完了");
-        });
-      }
+    console.log("ユーザー操作（手動リロード or ページ遷移）検知");
+    // ★ 重要：両方のキーを落とす（残留防止）
+    chrome.storage.local.set({
+      playClipSystemKey: 0,
+      playlistSystemKey: 0,
+      currentClipOrder: 0,
+      playmode: null
+    }, () => {
+      console.log("systemKey を 0 に設定しました（両モード）");
     });
-    } else {
-      console.log("スクリプトによる再読み込み");
-      isScriptReloading = false;
-    }
   });
 
   // （必要なら）スクリプト側から明示リロードする場合のラッパ
   function reloadPageFromScript() {
-    isScriptReloading = true;
+    markAutoNavigation("script-reload");
     location.reload();
   }
 
