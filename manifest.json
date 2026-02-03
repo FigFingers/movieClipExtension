@@ -12,12 +12,14 @@
   ],
 
   "host_permissions": [
+    "https://app.example.com/*",
     "http://localhost:3000/*",
     "https://www.netflix.com/*"  
   ],
 
   "background": {
-    "service_worker": "src/background/background.js"
+    "service_worker": "src/background/background.js",
+    "type": "module"
   },
 
   "content_scripts": [

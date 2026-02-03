@@ -4,10 +4,15 @@ import "../image/recordSVG.js";
 import "../image/LoopButtonSVG.js";
 import "./playClipNetflix.js";
 import { detectService, openMemoSidebar, sendData } from './common.js';
+import {
+  fetchSession,
+  isLoggedIn
+} from '../auth/authClient.js'; // NOTE: authClient path is relative to src/content
 
 (function() {
   const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const BUTTON_ID = 'record-button';
+  const AUTH_MESSAGE_ID = 'mc-auth-message';
 
   const SELECTORS = {
     videoPlayer: 'video',
@@ -17,9 +22,79 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     controlForward10: '[data-uia="control-forward10"]',
   };
 
+  let hasBootstrapped = false;
+  let authInProgress = false;
 
+  function showAuthMessage(message) {
+    let container = document.getElementById(AUTH_MESSAGE_ID);
 
-  window.addEventListener('load', () => {
+    if (!container) {
+      container = document.createElement('div');
+      container.id = AUTH_MESSAGE_ID;
+      container.style.cssText = [
+        'position: fixed',
+        'top: 16px',
+        'right: 16px',
+        'z-index: 2147483647',
+        'background: rgba(0, 0, 0, 0.85)',
+        'color: #fff',
+        'padding: 10px 14px',
+        'border-radius: 6px',
+        'font-size: 12px',
+        'font-family: sans-serif'
+      ].join(';');
+      document.body.appendChild(container);
+    }
+
+    container.textContent = message;
+  }
+
+  function clearAuthMessage() {
+    const container = document.getElementById(AUTH_MESSAGE_ID);
+    if (container) {
+      container.remove();
+    }
+  }
+
+  async function requireAuthOrShowLogin() {
+    if (authInProgress) return false;
+    authInProgress = true;
+
+    try {
+      const session = await fetchSession();
+      if (isLoggedIn(session)) {
+        clearAuthMessage();
+        authInProgress = false;
+        return true;
+      }
+    } catch (error) {
+      showAuthMessage(`Session check failed: ${error.message}`);
+      authInProgress = false;
+      return false;
+    }
+
+    showAuthMessage('ログインが必要です。ログインタブを開きます...');
+    chrome.runtime.sendMessage({ type: 'AUTH_START' });
+    authInProgress = false;
+    return false;
+  }
+
+  async function ensureAuthAndBootstrap() {
+    const ok = await requireAuthOrShowLogin();
+    if (!ok) return;
+
+    if (!hasBootstrapped) {
+      bootstrapApp();
+      hasBootstrapped = true;
+      return;
+    }
+
+    if (typeof window.mcResetState === 'function') {
+      window.mcResetState();
+    }
+  }
+
+  function bootstrapApp() {
     // 履歴変更フック用スクリプトをページワールドへ注入
     injectScript('src/util/history_change.js');
 
@@ -84,6 +159,7 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       button.setAttribute('aria-label', '録画ボタン');
       return button;
     }
+
     function createSVGElement(type, attributes) {
       const elem = document.createElementNS(SVG_NAMESPACE, type);
       for (const [key, value] of Object.entries(attributes)) {
@@ -176,7 +252,6 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
     }
 
     function mutationCallback(mutationsList) {
-
       const controlsForward10Element = document.querySelector(SELECTORS.controlForward10);
       if (controlsForward10Element && !document.getElementById(BUTTON_ID)) {
         addElements();
@@ -192,5 +267,19 @@ import { detectService, openMemoSidebar, sendData } from './common.js';
       endTime = null;
       svgElement.setAttribute('color', window.COLOR_DEFAULT);
     }
+
+    window.mcResetState = init;
+  }
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'AUTH_DONE') {
+      ensureAuthAndBootstrap();
+    }
   });
+
+  if (document.readyState === 'loading') {
+    window.addEventListener('load', ensureAuthAndBootstrap, { once: true });
+  } else {
+    ensureAuthAndBootstrap();
+  }
 })();

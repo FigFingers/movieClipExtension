@@ -1,12 +1,57 @@
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.type === 'HISTORY_CHANGE') {
-      console.log('URLが変更されました:', message.data.url);
+import { DONE_URL, getLoginUrl } from '../auth/authClient.js';
+
+let authTabId = null;
+
+async function ensureAuthTab() {
+  const loginUrl = getLoginUrl();
+
+  if (authTabId) {
+    try {
+      await chrome.tabs.update(authTabId, { active: true });
+      return;
+    } catch (error) {
+      console.warn('[Auth] Existing auth tab missing, reopening.', error);
+      authTabId = null;
     }
-  });
+  }
+
+  const tab = await chrome.tabs.create({ url: loginUrl });
+  authTabId = tab.id;
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'AUTH_START') {
+    console.log('[Auth] AUTH_START received');
+    void ensureAuthTab();
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (!authTabId || tabId !== authTabId) return;
+  if (!changeInfo.url) return;
+
+  if (changeInfo.url.startsWith(DONE_URL)) {
+    console.log('[Auth] Login done detected, closing tab.');
+    chrome.tabs.remove(tabId);
+    authTabId = null;
+    chrome.runtime.sendMessage({ type: 'AUTH_DONE' });
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (authTabId === tabId) {
+    authTabId = null;
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'HISTORY_CHANGE') {
+    console.log('URLが変更されました:', message.data.url);
+  }
+});
 
 //再生と録画を切り替える値
-  let playClipSystemKey = "initialValue";
-
+let playClipSystemKey = "initialValue";
 
 //netflix用ブリッジ注入
 // background.js — content から {type:"seek", sec:数字} を受け取ってシーク
@@ -56,6 +101,3 @@ chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
   sendResponse({ ok: true });
   return true; // async sendResponse のため
 });
-
-
-

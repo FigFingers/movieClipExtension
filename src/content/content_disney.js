@@ -7,11 +7,79 @@ import {
   requestSeek,
   sendData
 } from './common.js';
+import { fetchSession, isLoggedIn } from '../auth/authClient.js'; // NOTE: authClient path is relative to src/content
 
 (() => {
   const AUTO_NAV_STORAGE_KEY = 'autoNav';
   const AUTO_NAV_TTL_MS = 15000;
+  const AUTH_MESSAGE_ID = 'mc-auth-message';
   let autoNavCache = null;
+  let hasBootstrapped = false;
+  let authInProgress = false;
+
+  function showAuthMessage(message) {
+    let container = document.getElementById(AUTH_MESSAGE_ID);
+
+    if (!container) {
+      container = document.createElement('div');
+      container.id = AUTH_MESSAGE_ID;
+      container.style.cssText = [
+        'position: fixed',
+        'top: 16px',
+        'right: 16px',
+        'z-index: 2147483647',
+        'background: rgba(0, 0, 0, 0.85)',
+        'color: #fff',
+        'padding: 10px 14px',
+        'border-radius: 6px',
+        'font-size: 12px',
+        'font-family: sans-serif'
+      ].join(';');
+      document.body.appendChild(container);
+    }
+
+    container.textContent = message;
+  }
+
+  function clearAuthMessage() {
+    const container = document.getElementById(AUTH_MESSAGE_ID);
+    if (container) {
+      container.remove();
+    }
+  }
+
+  async function requireAuthOrShowLogin() {
+    if (authInProgress) return false;
+    authInProgress = true;
+
+    try {
+      const session = await fetchSession();
+      if (isLoggedIn(session)) {
+        clearAuthMessage();
+        authInProgress = false;
+        return true;
+      }
+    } catch (error) {
+      showAuthMessage(`Session check failed: ${error.message}`);
+      authInProgress = false;
+      return false;
+    }
+
+    showAuthMessage('ログインが必要です。ログインタブを開きます...');
+    chrome.runtime.sendMessage({ type: 'AUTH_START' });
+    authInProgress = false;
+    return false;
+  }
+
+  async function ensureAuthAndBootstrap() {
+    const ok = await requireAuthOrShowLogin();
+    if (!ok) return;
+
+    if (!hasBootstrapped) {
+      startApp();
+      hasBootstrapped = true;
+    }
+  }
 
   function isAutoNavValid(autoNav) {
     if (!autoNav || typeof autoNav !== 'object') return false;
@@ -1008,34 +1076,48 @@ async function startPlaylistMode() {
     };
   })();
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', UI.bootstrap, { once: true });
-  } else {
-    UI.bootstrap();
-  }
-
-  Mode.bootstrap();
-
-  window.addEventListener('locationchange', () => UI.scheduleInjection());
-  window.addEventListener('load', () => UI.scheduleInjection(), { once: true });
-
-  window.addEventListener('beforeunload', () => {
-    const autoFlag = isAutoNavigation();
-    const autoStored = isAutoNavActive();
-
-    if (autoFlag || autoStored) {
-      console.log(`▶️ 自動遷移検知：beforeunloadでのリセットをスキップ (flag=${autoFlag}, storage=${autoStored})`);
-      return;
+  function startApp() {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', UI.bootstrap, { once: true });
+    } else {
+      UI.bootstrap();
     }
 
-    console.log("ユーザー操作（手動リロード or ページ遷移）検知");
-    chrome.storage.local.set({
-      playClipSystemKey: 0,
-      playlistSystemKey: 0,
-      currentClipOrder: 0,
-      playmode: null
-    }, () => {
-      console.log("systemKey を 0 に設定しました（両モード）");
+    Mode.bootstrap();
+
+    window.addEventListener('locationchange', () => UI.scheduleInjection());
+    window.addEventListener('load', () => UI.scheduleInjection(), { once: true });
+
+    window.addEventListener('beforeunload', () => {
+      const autoFlag = isAutoNavigation();
+      const autoStored = isAutoNavActive();
+
+      if (autoFlag || autoStored) {
+        console.log(`▶️ 自動遷移検知：beforeunloadでのリセットをスキップ (flag=${autoFlag}, storage=${autoStored})`);
+        return;
+      }
+
+      console.log("ユーザー操作（手動リロード or ページ遷移）検知");
+      chrome.storage.local.set({
+        playClipSystemKey: 0,
+        playlistSystemKey: 0,
+        currentClipOrder: 0,
+        playmode: null
+      }, () => {
+        console.log("systemKey を 0 に設定しました（両モード）");
+      });
     });
+  }
+
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === 'AUTH_DONE') {
+      ensureAuthAndBootstrap();
+    }
   });
+
+  if (document.readyState === 'loading') {
+    window.addEventListener('load', ensureAuthAndBootstrap, { once: true });
+  } else {
+    ensureAuthAndBootstrap();
+  }
 })();
