@@ -75,7 +75,6 @@ import {
 
     showAuthMessage('ログインが必要です。ログインタブを開きます...');
     chrome.runtime.sendMessage({ type: 'AUTH_START' });
-    authInProgress = false;
     return false;
   }
 
@@ -273,6 +272,7 @@ import {
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'AUTH_DONE') {
+      authInProgress = false;
       ensureAuthAndBootstrap();
     }
   });

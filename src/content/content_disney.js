@@ -67,7 +67,6 @@ import { fetchSession, isLoggedIn } from '../auth/authClient.js'; // NOTE: authC
 
     showAuthMessage('ログインが必要です。ログインタブを開きます...');
     chrome.runtime.sendMessage({ type: 'AUTH_START' });
-    authInProgress = false;
     return false;
   }
 
@@ -1111,6 +1110,7 @@ async function startPlaylistMode() {
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type === 'AUTH_DONE') {
+      authInProgress = false;
       ensureAuthAndBootstrap();
     }
   });
