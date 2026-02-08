@@ -63,6 +63,7 @@ import {
     try {
       const session = await fetchSession();
       if (isLoggedIn(session)) {
+        console.log('[Auth] Session OK:', session);
         clearAuthMessage();
         authInProgress = false;
         return true;
