@@ -3,7 +3,7 @@ const path = require("path");
 module.exports = {
   mode: "production",
   entry: {
-    content: "./src/content/content.js",
+    content: "./src/content/content_netflix.js",
     content_disney: "./src/content/content_disney.js",
   },
   output: {

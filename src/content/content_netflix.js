@@ -1,10 +1,17 @@
+import "../css/content_button.css";
+import "../image/moreDetailSVG.js";
+import "../image/recordSVG.js";
+import "../image/LoopButtonSVG.js";
 import { getApiEndpoint } from './../api.js';
 import {
   clearAutoNavigation,
+  detectService,
   handleClipTransition,
   isAutoNavigation,
   markAutoNavigation,
   MEMO_SIDEBAR_ID,
+  openMemoSidebar,
+  sendData,
   requestSeek
 } from './common.js';
 import { setCookie } from '../util/cookies.js';
@@ -13,7 +20,22 @@ import { buildServiceUrl } from '../util/services.js';
 /** @typedef {import('../types/clip').ClipDataProps} ClipDataProps */
 /** @typedef {import('../types/clip').ClipListProps} ClipListProps */
 
-(() => {
+let netflixPlaybackInitialized = false;
+
+function onWindowLoad(callback) {
+  if (document.readyState === "complete") {
+    callback();
+    return;
+  }
+  window.addEventListener("load", callback, { once: true });
+}
+
+function initializeNetflixPlayback() {
+  if (netflixPlaybackInitialized) {
+    return;
+  }
+  netflixPlaybackInitialized = true;
+
   'use strict';
 
 // --------------------------------------------------
@@ -71,6 +93,155 @@ if (!sessionStorage.getItem("nfClipInitialized")) {
   let uiWarmerInterval = null;
 
   clearAutoNavigation();
+  bootstrapRecordControls();
+
+  function bootstrapRecordControls() {
+    const RECORD_BUTTON_ID = "record-button";
+    const RECORD_SELECTORS = {
+      videoPlayer: "video",
+      videoTitle: '[data-uia="video-title"]',
+      controlsStandard: '[data-uia="controls-standard"]',
+      controlVolume: '[data-uia^="control-volume-"]',
+      controlForward10: '[data-uia="control-forward10"]'
+    };
+
+    onWindowLoad(() => {
+      injectHistoryHook("src/util/history_change.js");
+
+      const buttonMargin = document.createElement("div");
+      buttonMargin.style.minWidth = "3rem";
+      buttonMargin.style.width = "3rem";
+
+      const wrapButton = document.createElement("div");
+      const recordButton = document.createElement("button");
+      recordButton.id = RECORD_BUTTON_ID;
+      recordButton.setAttribute("aria-label", "録画ボタン");
+
+      const svgElement = window.createSVG?.();
+      if (!svgElement) {
+        return;
+      }
+
+      let isRecording = false;
+      let startTime = null;
+      let endTime = null;
+
+      recordButton.addEventListener("click", () => {
+        try {
+          const videoPlayer = document.querySelector(RECORD_SELECTORS.videoPlayer);
+          if (!videoPlayer) {
+            throw new Error("ビデオプレーヤーが見つかりません。");
+          }
+
+          const allTitleName = document.querySelector(RECORD_SELECTORS.videoTitle);
+
+          if (isRecording) {
+            endTime = videoPlayer.currentTime;
+            if (startTime > endTime) {
+              throw new Error("録画終了時刻が開始時刻よりも早い値です");
+            }
+
+            const clipSeconds = Math.abs(endTime - startTime);
+            if (clipSeconds < 1) {
+              svgElement.setAttribute("color", window.COLOR_RECORDING);
+              throw new Error("録画範囲が短すぎます");
+            }
+
+            const payload = {
+              StartTime: startTime,
+              EndTime: endTime,
+              URL: window.location.pathname,
+              service: detectService(),
+              user: "test_user"
+            };
+
+            if (allTitleName) {
+              const h4Element = allTitleName.querySelector("h4");
+              if (h4Element) {
+                payload.title = h4Element.textContent;
+                const episodeNumberElement = allTitleName.querySelector("span:nth-of-type(1)");
+                if (episodeNumberElement) {
+                  payload.epnumber = episodeNumberElement.textContent;
+                }
+              } else {
+                payload.title = allTitleName.textContent;
+              }
+            } else {
+              throw new Error("タイトル要素が見つかりません。");
+            }
+
+            videoPlayer.pause();
+            openMemoSidebar({
+              data: payload,
+              videoPlayer,
+              onSave: (data) => sendData(data),
+              sidebarTitle: "Clipを追加 - Netflix"
+            });
+            resetRecordState();
+          } else {
+            svgElement.setAttribute("color", window.COLOR_RECORDING);
+            isRecording = true;
+            startTime = videoPlayer.currentTime;
+          }
+        } catch (error) {
+          console.error(error);
+          alert(error.message);
+          resetRecordState();
+        }
+      });
+
+      const recordObserver = new MutationObserver(() => {
+        const controlsForward10Element = document.querySelector(RECORD_SELECTORS.controlForward10);
+        if (controlsForward10Element && !document.getElementById(RECORD_BUTTON_ID)) {
+          const controlsStandardElement = document.querySelector(RECORD_SELECTORS.controlsStandard);
+          const controlVolumeElement = document.querySelector(RECORD_SELECTORS.controlVolume);
+          if (!controlsStandardElement || !controlVolumeElement) {
+            return;
+          }
+
+          recordButton.className = controlVolumeElement.className;
+          recordButton.appendChild(svgElement);
+          wrapButton.className = controlVolumeElement.parentNode.className;
+          controlVolumeElement.parentNode.after(wrapButton);
+          wrapButton.appendChild(recordButton);
+          controlVolumeElement.parentNode.after(buttonMargin);
+          return;
+        }
+
+        if (!controlsForward10Element && document.getElementById(RECORD_BUTTON_ID)) {
+          buttonMargin.remove();
+          recordButton.remove();
+        }
+      });
+
+      recordObserver.observe(document.body, { childList: true, subtree: true });
+      window.addEventListener("beforeunload", () => recordObserver.disconnect());
+
+      window.addEventListener("historyChange", (e) => {
+        resetRecordState();
+        chrome.runtime.sendMessage({
+          type: "HISTORY_CHANGE",
+          data: e.detail
+        });
+      });
+
+      function resetRecordState() {
+        isRecording = false;
+        startTime = null;
+        endTime = null;
+        svgElement.setAttribute("color", window.COLOR_DEFAULT);
+      }
+    });
+
+    function injectHistoryHook(file, tag) {
+      const script = document.createElement("script");
+      script.src = chrome.runtime.getURL(file);
+      script.onload = function onLoad() {
+        this.remove();
+      };
+      (tag || document.head).appendChild(script);
+    }
+  }
 
   // storage.set を await できるユーティリティ
   function setStorageAsync(data) {
@@ -640,7 +811,7 @@ function stopUIWarmer() {
   // ---------------------------------------------------------------------------
   // ページロード時のモード起動（排他保証）
   // ---------------------------------------------------------------------------
-  window.addEventListener("load", async () => {
+  onWindowLoad(async () => {
     chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey", "playmode"], async ({ playClipSystemKey, playlistSystemKey, playmode }) => {
       console.log("再生機能の起動キー:", playClipSystemKey);
       console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
@@ -703,4 +874,6 @@ function stopUIWarmer() {
     location.reload();
   }
 
-})();
+}
+
+initializeNetflixPlayback();
