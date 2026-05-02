@@ -3,9 +3,13 @@ import "../image/moreDetailSVG.js";
 import "../image/recordSVG.js";
 import "../image/LoopButtonSVG.js";
 import "./playClipNetflix.js";
-import { detectService, openMemoSidebar, sendData } from './common.js';
+import { detectService, initializeExtensionClient, openMemoSidebar, sendData } from './common.js';
 
 (function() {
+  initializeExtensionClient().catch((error) => {
+    console.warn('[ExtensionClient] init failed:', error);
+  });
+
   const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
   const BUTTON_ID = 'record-button';
 

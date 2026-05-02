@@ -1,6 +1,7 @@
 import {
   clearAutoNavigation,
   detectService,
+  initializeExtensionClient,
   isAutoNavigation,
   markAutoNavigation,
   openMemoSidebar,
@@ -9,6 +10,10 @@ import {
 } from './common.js';
 
 (() => {
+  initializeExtensionClient().catch((error) => {
+    console.warn('[ExtensionClient] init failed:', error);
+  });
+
   const AUTO_NAV_STORAGE_KEY = 'autoNav';
   const AUTO_NAV_TTL_MS = 15000;
   let autoNavCache = null;
