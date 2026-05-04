@@ -14,42 +14,6 @@ function getMajor(v) {
   return parseInt(String(v).split(".")[0] || "0", 10);
 }
 
-function storageLocalGet(keys) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get(keys, (result) => {
-      if (chrome.runtime.lastError) {
-        reject(chrome.runtime.lastError);
-        return;
-      }
-      resolve(result || {});
-    });
-  });
-}
-
-function storageLocalSet(items) {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.set(items, () => {
-      if (chrome.runtime.lastError) {
-        reject(chrome.runtime.lastError);
-        return;
-      }
-      resolve();
-    });
-  });
-}
-
-const EXTENSION_INSTANCE_ID_KEY = 'extensionInstanceId';
-
-async function getOrCreateExtensionInstanceId() {
-  const stored = await storageLocalGet([EXTENSION_INSTANCE_ID_KEY]);
-  if (stored[EXTENSION_INSTANCE_ID_KEY]) {
-    return stored[EXTENSION_INSTANCE_ID_KEY];
-  }
-  const id = crypto.randomUUID();
-  await storageLocalSet({ [EXTENSION_INSTANCE_ID_KEY]: id });
-  return id;
-}
-
 function createTab(url) {
   return new Promise((resolve, reject) => {
     chrome.tabs.create({ url }, (tab) => {
@@ -147,11 +111,6 @@ async function handleInstalledDemo(details) {
 
 chrome.runtime.onInstalled.addListener((details) => {
   void handleInstalledDemo(details);
-  void getOrCreateExtensionInstanceId().catch((error) => {
-    console.warn('[extension-sync] failed to initialize extensionInstanceId on install', {
-      message: error?.message,
-    });
-  });
 });
 
 chrome.runtime.onConnect.addListener((port) => {
