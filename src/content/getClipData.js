@@ -34,11 +34,33 @@ window.addEventListener("clipSelected", () => {
 // ------------------------------------------------------
 // Chrome storage 安全書き込みユーティリティ
 // ------------------------------------------------------
+const SENSITIVE_LOG_KEYS = new Set([
+  "authorization",
+  "extensionauthtoken",
+]);
+
+function sanitizeForLog(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForLog(item));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      SENSITIVE_LOG_KEYS.has(key.toLowerCase()) ? "[redacted]" : sanitizeForLog(item),
+    ])
+  );
+}
+
 async function safeSetStorage(data) {
   try {
     // 直接 local に書き込む（localhostでも確実に動く）
     await chrome.storage.local.set(data);
-    console.log("✅ [EXT] chrome.storage.local.set:", data);
+    console.log("✅ [EXT] chrome.storage.local.set:", sanitizeForLog(data));
   } catch (err) {
     console.warn("⚠️ safeSetStorage direct failed:", err);
     if (chrome.runtime?.id) {
