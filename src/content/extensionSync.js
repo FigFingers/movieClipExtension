@@ -1,0 +1,445 @@
+import { getApiEndpoint, getSiteUrl } from './../api.js';
+
+export const STORAGE_KEYS = {
+  extensionInstanceId: 'extensionInstanceId',
+  extensionAuthToken: 'extensionAuthToken',
+  extensionLinked: 'extensionLinked',
+  lastSyncAt: 'lastSyncAt',
+  pendingClips: 'pendingClips',
+};
+
+const LOGIN_PROMPT_STORAGE_KEY = 'extensionLoginPromptLastOpenedAt';
+const LOGIN_PROMPT_COOLDOWN_MS = 60 * 1000;
+
+let syncInFlight = null;
+let syncRequestedAfterCurrent = false;
+let nextSyncOptions = {};
+
+function storageGet(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(keys, (result) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(result || {});
+    });
+  });
+}
+
+function storageSet(items) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set(items, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function storageRemove(keys) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.remove(keys, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function createUuid() {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi?.randomUUID) {
+    return cryptoApi.randomUUID();
+  }
+
+  if (!cryptoApi?.getRandomValues) {
+    throw new Error('crypto.getRandomValues is unavailable');
+  }
+
+  const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0'));
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10, 16).join(''),
+  ].join('-');
+}
+
+function firstPresent(...values) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function nullableString(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+function normalizeNumber(value, fieldName) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) {
+    throw new Error(`Invalid clip ${fieldName}: ${value}`);
+  }
+  return numberValue;
+}
+
+function normalizeUrl(value) {
+  const rawUrl = firstPresent(value, location.href);
+  if (!rawUrl) {
+    throw new Error('Clip url is required');
+  }
+  return new URL(String(rawUrl), location.origin).href;
+}
+
+function normalizePendingClips(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((clip) => clip?.clientItemId && clip?.url);
+}
+
+function parseResponseJson(response) {
+  return response
+    .json()
+    .catch(() => null);
+}
+
+function arrayFromResponse(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function collectClientItemIds(value, ids = new Set()) {
+  if (!value || typeof value !== 'object') return ids;
+
+  if (typeof value.clientItemId === 'string') {
+    ids.add(value.clientItemId);
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectClientItemIds(item, ids));
+    return ids;
+  }
+
+  Object.values(value).forEach((item) => collectClientItemIds(item, ids));
+  return ids;
+}
+
+async function removePendingClipIds(clientItemIds) {
+  const ids = new Set(clientItemIds.filter(Boolean));
+  if (ids.size === 0) return;
+
+  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
+  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
+  await storageSet({
+    [STORAGE_KEYS.pendingClips]: pendingClips.filter(
+      (clip) => !ids.has(clip.clientItemId)
+    ),
+  });
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+export async function getOrCreateExtensionInstanceId() {
+  const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
+  const existingId = stored[STORAGE_KEYS.extensionInstanceId];
+  if (existingId) {
+    return existingId;
+  }
+
+  const extensionInstanceId = createUuid();
+  await storageSet({ [STORAGE_KEYS.extensionInstanceId]: extensionInstanceId });
+  return extensionInstanceId;
+}
+
+export async function getExtensionInstanceId() {
+  const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
+  return stored[STORAGE_KEYS.extensionInstanceId] ?? null;
+}
+
+export async function getExtensionConnectionState() {
+  const extensionInstanceId = await getOrCreateExtensionInstanceId();
+  const stored = await storageGet([
+    STORAGE_KEYS.extensionAuthToken,
+    STORAGE_KEYS.extensionLinked,
+    STORAGE_KEYS.lastSyncAt,
+    STORAGE_KEYS.pendingClips,
+  ]);
+  const extensionAuthToken = stored[STORAGE_KEYS.extensionAuthToken] || null;
+
+  return {
+    extensionInstanceId,
+    extensionAuthToken,
+    extensionLinked: Boolean(extensionAuthToken && stored[STORAGE_KEYS.extensionLinked]),
+    lastSyncAt: stored[STORAGE_KEYS.lastSyncAt] || null,
+    pendingClips: normalizePendingClips(stored[STORAGE_KEYS.pendingClips]),
+  };
+}
+
+export async function saveExtensionAuthToken(extensionInstanceId, extensionAuthToken) {
+  const currentInstanceId = await getOrCreateExtensionInstanceId();
+  if (extensionInstanceId !== currentInstanceId) {
+    console.warn('[extension-sync] ignored auth token for mismatched extensionInstanceId', {
+      expected: currentInstanceId,
+      received: extensionInstanceId,
+    });
+    return false;
+  }
+
+  if (!extensionAuthToken || typeof extensionAuthToken !== 'string') {
+    console.warn('[extension-sync] ignored empty auth token');
+    return false;
+  }
+
+  await storageSet({
+    [STORAGE_KEYS.extensionAuthToken]: extensionAuthToken,
+    [STORAGE_KEYS.extensionLinked]: true,
+  });
+  return true;
+}
+
+export async function clearExtensionAuthToken() {
+  await storageRemove([STORAGE_KEYS.extensionAuthToken]);
+  await storageSet({ [STORAGE_KEYS.extensionLinked]: false });
+}
+
+export function toExtensionClipPayload(clip) {
+  const startTimeValue = firstPresent(clip?.startTime, clip?.StartTime);
+  const endTimeValue = firstPresent(clip?.endTime, clip?.EndTime);
+  const clientItemId = firstPresent(clip?.clientItemId, clip?.localClientItemId) || createUuid();
+
+  return {
+    clientItemId: String(clientItemId),
+    title: nullableString(clip?.title),
+    url: normalizeUrl(firstPresent(clip?.url, clip?.URL)),
+    startTime: normalizeNumber(startTimeValue, 'startTime'),
+    endTime: normalizeNumber(endTimeValue, 'endTime'),
+    service: nullableString(clip?.service),
+    clipName: nullableString(clip?.clipName),
+    epnumber: nullableString(clip?.epnumber),
+  };
+}
+
+export async function enqueueClip(clip) {
+  const normalizedClip = toExtensionClipPayload(clip);
+  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
+  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
+  const queueById = new Map(pendingClips.map((item) => [item.clientItemId, item]));
+  queueById.set(normalizedClip.clientItemId, normalizedClip);
+
+  await storageSet({
+    [STORAGE_KEYS.pendingClips]: Array.from(queueById.values()),
+  });
+
+  return normalizedClip;
+}
+
+export async function openExtensionLoginPage({ force = false } = {}) {
+  const loginUrl = getSiteUrl('/login');
+
+  if (!force) {
+    const stored = await storageGet([LOGIN_PROMPT_STORAGE_KEY]);
+    const lastOpenedAt = Number(stored[LOGIN_PROMPT_STORAGE_KEY]) || 0;
+    if (Date.now() - lastOpenedAt < LOGIN_PROMPT_COOLDOWN_MS) {
+      return { ok: false, reason: 'cooldown' };
+    }
+  }
+
+  await storageSet({ [LOGIN_PROMPT_STORAGE_KEY]: Date.now() });
+
+  try {
+    return await sendRuntimeMessage({
+      type: 'OPEN_EXTENSION_LOGIN',
+      url: loginUrl,
+    });
+  } catch (error) {
+    window.open(loginUrl, '_blank', 'noopener');
+    return { ok: true, fallback: true };
+  }
+}
+
+async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {}) {
+  const state = await getExtensionConnectionState();
+  const {
+    extensionInstanceId,
+    extensionAuthToken,
+    pendingClips,
+  } = state;
+
+  if (pendingClips.length === 0) {
+    return { ok: true, skipped: true, reason: 'empty_queue' };
+  }
+
+  if (!extensionAuthToken) {
+    console.log('[extension-sync] sync start', {
+      clipCount: pendingClips.length,
+      hasToken: false,
+      extensionInstanceId,
+    });
+
+    if (openLoginIfMissingToken) {
+      await openExtensionLoginPage();
+    }
+
+    return { ok: false, queued: true, reason: 'missing_token' };
+  }
+
+  console.log('[extension-sync] sync start', {
+    clipCount: pendingClips.length,
+    hasToken: true,
+    extensionInstanceId,
+  });
+
+  let response;
+  let data = null;
+
+  try {
+    response = await fetch(getApiEndpoint('extension/sync'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${extensionAuthToken}`,
+      },
+      body: JSON.stringify({
+        extensionInstanceId,
+        clips: pendingClips,
+      }),
+    });
+
+    data = await parseResponseJson(response);
+  } catch (error) {
+    console.warn('[extension-sync] network error; keeping clips queued', {
+      clipCount: pendingClips.length,
+      message: error?.message,
+    });
+    return { ok: false, queued: true, reason: 'network_error' };
+  }
+
+  console.log('[extension-sync] sync result', {
+    status: response.status,
+    savedCount: data?.savedCount,
+    acceptedCount: data?.acceptedItemIds?.length,
+    skippedCount: data?.skippedItemIds?.length,
+  });
+
+  if (response.status === 200) {
+    const acceptedItemIds = arrayFromResponse(data?.acceptedItemIds);
+    const skippedItemIds = arrayFromResponse(data?.skippedItemIds);
+    await removePendingClipIds([...acceptedItemIds, ...skippedItemIds]);
+    await storageSet({ [STORAGE_KEYS.lastSyncAt]: new Date().toISOString() });
+    return {
+      ok: true,
+      savedCount: data?.savedCount,
+      acceptedItemIds,
+      skippedItemIds,
+    };
+  }
+
+  if (response.status === 400) {
+    const issueItemIds = Array.from(collectClientItemIds(data?.issues || data));
+    const dropItemIds = issueItemIds.length > 0
+      ? issueItemIds
+      : pendingClips.map((clip) => clip.clientItemId);
+
+    console.warn('[extension-sync] validation error; dropping attempted clips', {
+      clipCount: dropItemIds.length,
+      issues: data?.issues || data?.error || data?.message,
+    });
+    await removePendingClipIds(dropItemIds);
+    return { ok: false, queued: false, reason: 'validation_error' };
+  }
+
+  if (response.status === 401) {
+    await clearExtensionAuthToken();
+    console.warn('[extension-sync] auth token rejected; cleared token and kept queue');
+    return { ok: false, queued: true, reason: 'unauthorized' };
+  }
+
+  if (response.status === 403) {
+    console.warn('[extension-sync] forbidden; keeping clips queued', {
+      status: response.status,
+    });
+    return { ok: false, queued: true, reason: 'forbidden' };
+  }
+
+  console.warn('[extension-sync] sync failed; keeping clips queued', {
+    status: response.status,
+  });
+  return { ok: false, queued: true, reason: 'sync_failed' };
+}
+
+export function syncPendingQueue(options = {}) {
+  if (syncInFlight) {
+    syncRequestedAfterCurrent = true;
+    nextSyncOptions = {
+      ...nextSyncOptions,
+      ...options,
+      openLoginIfMissingToken: Boolean(
+        nextSyncOptions.openLoginIfMissingToken || options.openLoginIfMissingToken
+      ),
+    };
+    return syncInFlight;
+  }
+
+  syncInFlight = (async () => {
+    let result = await performSyncPendingQueue(options);
+
+    while (syncRequestedAfterCurrent) {
+      const followUpOptions = nextSyncOptions;
+      syncRequestedAfterCurrent = false;
+      nextSyncOptions = {};
+      result = await performSyncPendingQueue(followUpOptions);
+    }
+
+    return result;
+  })()
+    .finally(() => {
+      syncInFlight = null;
+      syncRequestedAfterCurrent = false;
+      nextSyncOptions = {};
+    });
+
+  return syncInFlight;
+}
+
+export async function handleExtensionAuthStatusRequest(message, targetOrigin = window.location.origin) {
+  const state = await getExtensionConnectionState();
+  const response = {
+    type: 'EXTENSION_AUTH_STATUS',
+    requestId: message?.requestId,
+    loggedIn: Boolean(state.extensionAuthToken),
+    extensionInstanceId: state.extensionInstanceId,
+  };
+
+  window.postMessage(response, targetOrigin);
+  return response;
+}
+
+export async function handleExtensionLinkWithAuthToken(message) {
+  const saved = await saveExtensionAuthToken(
+    message?.extensionInstanceId,
+    message?.extensionAuthToken
+  );
+
+  if (saved) {
+    await syncPendingQueue();
+  }
+
+  return { ok: saved };
+}

@@ -38,6 +38,18 @@ function storageLocalSet(items) {
   });
 }
 
+const EXTENSION_INSTANCE_ID_KEY = 'extensionInstanceId';
+
+async function getOrCreateExtensionInstanceId() {
+  const stored = await storageLocalGet([EXTENSION_INSTANCE_ID_KEY]);
+  if (stored[EXTENSION_INSTANCE_ID_KEY]) {
+    return stored[EXTENSION_INSTANCE_ID_KEY];
+  }
+  const id = crypto.randomUUID();
+  await storageLocalSet({ [EXTENSION_INSTANCE_ID_KEY]: id });
+  return id;
+}
+
 function createTab(url) {
   return new Promise((resolve, reject) => {
     chrome.tabs.create({ url }, (tab) => {
@@ -49,6 +61,22 @@ function createTab(url) {
     });
   });
 }
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "OPEN_EXTENSION_LOGIN") {
+    return;
+  }
+
+  const fallbackUrl = `${DEMO_BASE_URL}login`;
+  const requestedUrl = typeof message.url === "string" ? message.url : fallbackUrl;
+  const url = requestedUrl.startsWith(DEMO_BASE_URL) ? requestedUrl : fallbackUrl;
+
+  createTab(url)
+    .then(() => sendResponse({ ok: true }))
+    .catch((error) => sendResponse({ ok: false, error: error?.message }));
+
+  return true;
+});
 
 async function handleInstalledDemo(details) {
   try {
@@ -119,6 +147,29 @@ async function handleInstalledDemo(details) {
 
 chrome.runtime.onInstalled.addListener((details) => {
   void handleInstalledDemo(details);
+  void getOrCreateExtensionInstanceId().catch((error) => {
+    console.warn('[extension-sync] failed to initialize extensionInstanceId on install', {
+      message: error?.message,
+    });
+  });
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'extensionInstanceId') return;
+
+  port.onMessage.addListener(() => {
+    chrome.storage.local.get('extensionInstanceId', (result) => {
+      if (chrome.runtime.lastError) {
+        port.postMessage({ ok: false, message: chrome.runtime.lastError.message });
+        return;
+      }
+      const extensionInstanceId = result.extensionInstanceId || crypto.randomUUID();
+      if (!result.extensionInstanceId) {
+        chrome.storage.local.set({ extensionInstanceId });
+      }
+      port.postMessage({ ok: true, extensionInstanceId });
+    });
+  });
 });
 
 //再生と録画を切り替える値
