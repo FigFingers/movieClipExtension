@@ -257,11 +257,7 @@ export async function openExtensionLoginPage({ force = false } = {}) {
 
 async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {}) {
   const state = await getExtensionConnectionState();
-  const {
-    extensionInstanceId,
-    extensionAuthToken,
-    pendingClips,
-  } = state;
+  const { extensionAuthToken, pendingClips } = state;
 
   if (pendingClips.length === 0) {
     return { ok: true, skipped: true, reason: 'empty_queue' };
@@ -271,7 +267,6 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
     console.log('[extension-sync] sync start', {
       clipCount: pendingClips.length,
       hasToken: false,
-      extensionInstanceId,
     });
 
     if (openLoginIfMissingToken) {
@@ -284,21 +279,17 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   console.log('[extension-sync] sync start', {
     clipCount: pendingClips.length,
     hasToken: true,
-    extensionInstanceId,
   });
 
   let response;
   let data = null;
 
   try {
-    response = await fetch(getApiEndpoint('extension/sync'), {
+    response = await fetch(getApiEndpoint('receive'), {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${extensionAuthToken}`,
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        extensionInstanceId,
+        token: extensionAuthToken,
         clips: pendingClips,
       }),
     });
@@ -315,21 +306,13 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   console.log('[extension-sync] sync result', {
     status: response.status,
     savedCount: data?.savedCount,
-    acceptedCount: data?.acceptedItemIds?.length,
-    skippedCount: data?.skippedItemIds?.length,
   });
 
   if (response.status === 200) {
-    const acceptedItemIds = arrayFromResponse(data?.acceptedItemIds);
-    const skippedItemIds = arrayFromResponse(data?.skippedItemIds);
-    await removePendingClipIds([...acceptedItemIds, ...skippedItemIds]);
+    const sentClientItemIds = pendingClips.map((clip) => clip.clientItemId);
+    await removePendingClipIds(sentClientItemIds);
     await storageSet({ [STORAGE_KEYS.lastSyncAt]: new Date().toISOString() });
-    return {
-      ok: true,
-      savedCount: data?.savedCount,
-      acceptedItemIds,
-      skippedItemIds,
-    };
+    return { ok: true, savedCount: data?.savedCount };
   }
 
   if (response.status === 400) {
@@ -399,6 +382,50 @@ export function syncPendingQueue(options = {}) {
   return syncInFlight;
 }
 
+const RENEWAL_THRESHOLD_MS = 15 * 24 * 60 * 60 * 1000;
+
+function getTokenExpiryMs(token) {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function checkAndRenewToken() {
+  const stored = await storageGet([
+    STORAGE_KEYS.extensionAuthToken,
+    STORAGE_KEYS.extensionInstanceId,
+  ]);
+  const token = stored[STORAGE_KEYS.extensionAuthToken];
+  const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
+
+  if (!token || !extensionInstanceId) return;
+
+  const expiryMs = getTokenExpiryMs(token);
+  if (!expiryMs) return;
+
+  const remainingMs = expiryMs - Date.now();
+  if (remainingMs > RENEWAL_THRESHOLD_MS) return;
+
+  try {
+    const res = await fetch('/api/extension/link', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ extensionInstanceId }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.token === 'string') {
+      await storageSet({ [STORAGE_KEYS.extensionAuthToken]: data.token });
+      console.log('[extension-sync] token renewed automatically');
+    }
+  } catch (error) {
+    console.warn('[extension-sync] token renewal failed', { message: error?.message });
+  }
+}
+
 export async function handleExtensionAuthStatusRequest(message, targetOrigin = window.location.origin) {
   const state = await getExtensionConnectionState();
   const response = {
@@ -415,7 +442,7 @@ export async function handleExtensionAuthStatusRequest(message, targetOrigin = w
 export async function handleExtensionLinkWithAuthToken(message) {
   const saved = await saveExtensionAuthToken(
     message?.extensionInstanceId,
-    message?.extensionAuthToken
+    message?.token
   );
 
   if (saved) {
