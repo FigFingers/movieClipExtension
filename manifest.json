@@ -40,7 +40,7 @@
     {
       "matches": ["http://localhost:3000/*"],
       "run_at": "document_idle",
-      "js": ["src/content/getClipData.js"]
+      "js": ["dist/extension_link.js", "src/content/getClipData.js"]
     }
   ],
 
