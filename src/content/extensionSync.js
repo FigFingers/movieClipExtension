@@ -86,6 +86,34 @@ function normalizePendingClips(value) {
   return value.filter((clip) => clip?.clientItemId && clip?.url);
 }
 
+function optionalText(value) {
+  const text = nullableString(value);
+  return text === null ? undefined : text;
+}
+
+function toExtensionSyncItem(clip) {
+  const payload = {
+    service: clip.service,
+    title: clip.title,
+    StartTime: clip.startTime,
+    EndTime: clip.endTime,
+    URL: clip.url,
+  };
+
+  const clipName = optionalText(clip.clipName);
+  if (clipName !== undefined) payload.clipName = clipName;
+
+  const epnumber = optionalText(clip.epnumber);
+  if (epnumber !== undefined) payload.epnumber = epnumber;
+
+  return {
+    clientItemId: clip.clientItemId,
+    type: 'clip',
+    createdAt: clip.createdAt || new Date().toISOString(),
+    payload,
+  };
+}
+
 function parseResponseJson(response) {
   return response
     .json()
@@ -214,6 +242,7 @@ export function toExtensionClipPayload(clip) {
     service: nullableString(clip?.service),
     clipName: nullableString(clip?.clipName),
     epnumber: nullableString(clip?.epnumber),
+    createdAt: clip?.createdAt || new Date().toISOString(),
   };
 }
 
@@ -285,12 +314,15 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   let data = null;
 
   try {
-    response = await fetch(getApiEndpoint('receive'), {
+    response = await fetch(getApiEndpoint('extension/sync'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${extensionAuthToken}`,
+      },
       body: JSON.stringify({
-        token: extensionAuthToken,
-        clips: pendingClips,
+        extensionInstanceId: state.extensionInstanceId,
+        items: pendingClips.map(toExtensionSyncItem),
       }),
     });
 
@@ -305,14 +337,18 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
 
   console.log('[extension-sync] sync result', {
     status: response.status,
-    savedCount: data?.savedCount,
+    acceptedCount: data?.acceptedItemIds?.length,
   });
 
   if (response.status === 200) {
-    const sentClientItemIds = pendingClips.map((clip) => clip.clientItemId);
-    await removePendingClipIds(sentClientItemIds);
+    const acceptedItemIds = arrayFromResponse(data?.acceptedItemIds);
+    const syncedItemIds =
+      acceptedItemIds.length > 0
+        ? acceptedItemIds
+        : pendingClips.map((clip) => clip.clientItemId);
+    await removePendingClipIds(syncedItemIds);
     await storageSet({ [STORAGE_KEYS.lastSyncAt]: new Date().toISOString() });
-    return { ok: true, savedCount: data?.savedCount };
+    return { ok: true, acceptedCount: syncedItemIds.length };
   }
 
   if (response.status === 400) {
