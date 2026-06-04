@@ -1,7 +1,6 @@
 import {
   clearAutoNavigation,
   detectService,
-  initializeExtensionClient,
   isAutoNavigation,
   markAutoNavigation,
   openMemoSidebar,
@@ -10,10 +9,6 @@ import {
 } from './common.js';
 
 (() => {
-  initializeExtensionClient().catch((error) => {
-    console.warn('[ExtensionClient] init failed:', error);
-  });
-
   const AUTO_NAV_STORAGE_KEY = 'autoNav';
   const AUTO_NAV_TTL_MS = 15000;
   let autoNavCache = null;
@@ -284,8 +279,7 @@ import {
 
       if (clickStateLeft === 1) {
         starttime = Service.DPlusTime.get()?.currentSeconds;
-        console.log("【1回目】開始時間:", starttime);
-        return;
+          return;
       }
 
       if (clickStateLeft === 2) {
@@ -295,16 +289,11 @@ import {
         const videoPlayer = document.querySelector('video');
         videoPlayer?.pause();
 
-        console.log("【2回目】終了時間:", endtime);
-
         const urldata = location.href;
         const title = document.querySelector(".title-bug-container .title-field span")?.textContent.trim() || "";
         const subtitle = document.querySelector(".title-bug-container .subtitle-field span")?.textContent.trim() || "";
 
         const clipName = `${title}${subtitle ? `｜${subtitle}` : ""}`;
-
-        console.log("start:", starttime, "end:", endtime);
-        console.log("url:", urldata);
 
         const payload = {
           clipName: clipName,
@@ -335,7 +324,6 @@ import {
     }
 
     function myCustomActionRight2() {
-      console.log("右ボタン2の本処理を実行！");
     }
 
     function injectButtons() {
@@ -527,11 +515,8 @@ import {
       stop();
 
       if (!clipData) {
-        console.log('[Clip] No clip data provided');
         return () => {};
       }
-
-      console.log('[Clip] Playing clip:', clipData);
 
       activeStopFn = startLifecycle(clipData, { onStart, onEnd });
       return activeStopFn;
@@ -550,11 +535,9 @@ import {
       timers.startTimer = setInterval(() => {
         const t = playerAdapter.getTime();
         if (!t) {
-          console.log("再生時間を再チェックします...");
           return;
         }
 
-        console.log("再生時間を取得:", t);
         requestSeek({
           service: detectService(),
           seconds: clipData.startTime,
@@ -563,8 +546,6 @@ import {
 
         clearInterval(timers.startTimer);
         timers.startTimer = null;
-
-        console.log("[Clip] Start position reached. Begin end-monitoring.");
 
         if (typeof onStart === 'function') {
           onStart(clipData);
@@ -765,32 +746,6 @@ import {
       stopCurrent = Playlist.play([clipData], { loop: loopEnabled });
     }
 
-    async function loadPlaylistClip() {
-      const { playQueue, currentClipOrder } = await chrome.storage.local.get([
-        'playQueue',
-        'currentClipOrder'
-      ]);
-
-      if (!Array.isArray(playQueue) || playQueue.length === 0) {
-        console.warn('⚠️ playQueue が存在しません');
-        return null;
-      }
-
-      const order = Number.isInteger(currentClipOrder) ? currentClipOrder : 0;
-      const currentClip = playQueue.find((clip) => clip.order === order) ?? playQueue[0];
-
-      if (!currentClip) {
-        console.warn('⚠️ 該当clipが見つかりません:', order);
-        return null;
-      }
-
-      return {
-        startTime: Number(currentClip.startTime ?? currentClip.starttime),
-        endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
-        title:     String(currentClip.clipname || currentClip.title || '')
-      };
-    }
-
 async function startPlaylistMode() {
   stopActiveMode();
 
@@ -858,10 +813,7 @@ async function startPlaylistMode() {
     const current = sortedQueue[currentIndex];
     const isLast = currentIndex === sortedQueue.length - 1;
 
-    // 最終clipは先頭へ戻る
-    if (isLast && !loopEnabled) {
-      console.log('[Playlist] 最終clip。先頭に戻ります');
-    }
+    // 最終clipは先頭へ戻る（loopEnabled=falseでも先頭に戻る）
 
     const next = isLast ? sortedQueue[0] : sortedQueue[currentIndex + 1];
     const nextOrder = next.order ?? 0;
@@ -954,9 +906,6 @@ async function startPlaylistMode() {
 
       const resolvedMode = resolvePlayMode(playmode, playClipSystemKey, playlistSystemKey);
 
-      console.log("再生機能の起動キー:", playClipSystemKey);
-      console.log("プレイリスト再生機能の起動キー:", playlistSystemKey);
-
       if (resolvedMode === 'playlist') {
         await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: 'playlist' });
         await startPlaylistMode();
@@ -973,7 +922,6 @@ async function startPlaylistMode() {
         return;
       }
 
-      console.log("⏸ 再生機能は未活性、待機状態");
     }
 
     function stopActiveMode() {
@@ -1025,22 +973,15 @@ async function startPlaylistMode() {
   window.addEventListener('load', () => UI.scheduleInjection(), { once: true });
 
   window.addEventListener('beforeunload', () => {
-    const autoFlag = isAutoNavigation();
-    const autoStored = isAutoNavActive();
-
-    if (autoFlag || autoStored) {
-      console.log(`▶️ 自動遷移検知：beforeunloadでのリセットをスキップ (flag=${autoFlag}, storage=${autoStored})`);
+    if (isAutoNavigation() || isAutoNavActive()) {
       return;
     }
 
-    console.log("ユーザー操作（手動リロード or ページ遷移）検知");
     chrome.storage.local.set({
       playClipSystemKey: 0,
       playlistSystemKey: 0,
       currentClipOrder: 0,
       playmode: null
-    }, () => {
-      console.log("systemKey を 0 に設定しました（両モード）");
     });
   });
 })();
