@@ -43,79 +43,8 @@ async function safeSetStorage(data) {
 // ------------------------------------------------------
 // window.postMessage 受信ハンドラ
 // ------------------------------------------------------
-const EXT_CONNECTION_STATE_KEY = "extensionConnectionState";
-
-function isJwtValid(token) {
-  if (!token) return false;
-  try {
-    const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(atob(base64));
-    return typeof payload.exp === 'number' && payload.exp * 1000 > Date.now();
-  } catch {
-    return false;
-  }
-}
-
-function postExtensionMessage(message) {
-  window.postMessage(message, window.location.origin);
-}
-
-async function getConnectionState() {
-  const { [EXT_CONNECTION_STATE_KEY]: state } = await chrome.storage.local.get(EXT_CONNECTION_STATE_KEY);
-  return state || {};
-}
-
-async function saveConnectionState(state) {
-  await chrome.storage.local.set({ [EXT_CONNECTION_STATE_KEY]: state });
-  return state;
-}
-
-async function clearStoredAuthToken(state) {
-  return saveConnectionState({
-    ...(state || {}),
-    extensionAuthToken: "",
-    linked: false,
-    lastSyncAt: null,
-  });
-}
-
-async function ensureConnectionStateWithInstanceId(state) {
-  if (state.extensionInstanceId) return state;
-
-  const nextState = {
-    ...state,
-    extensionInstanceId: crypto.randomUUID(),
-  };
-  await saveConnectionState(nextState);
-  return nextState;
-}
-
-async function checkStoredAuthState() {
-  const state = await getConnectionState();
-  const token = state.extensionAuthToken;
-
-  if (!isJwtValid(token)) {
-    await clearStoredAuthToken(state);
-    return { loggedIn: false };
-  }
-
-  try {
-    const res = await fetch("/api/extension/session", {
-      method: "GET",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-    if (!res.ok) {
-      await clearStoredAuthToken(state);
-      return { loggedIn: false };
-    }
-
-    return { loggedIn: true };
-  } catch (error) {
-    console.warn("[ExtLink] session check failed:", error);
-    return { loggedIn: false };
-  }
-}
+// 認証・連携 (EXTENSION_CHECK_AUTH / EXT_LINK_WITH_AUTH_TOKEN / instanceId 発行) は
+// extension_link.js + extensionSync.js に一本化。getClipData.js は再生専用 (refs #110)。
 
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
@@ -148,73 +77,6 @@ window.addEventListener("message", async (event) => {
   // ---- 外部から直接ストレージ設定 ----
   if (msg.type === "EXT/SET_SESSION") {
     await safeSetStorage(msg.payload);
-  }
-
-  // ---- 拡張機能リンクトークン（localhost上でAPI呼び出し → common.js に転送）----
-  if (msg.type === "EXT_LINK_WITH_TOKEN") {
-    try {
-      const current = await ensureConnectionStateWithInstanceId(await getConnectionState());
-
-      const res = await fetch("/api/extension/link", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          extensionInstanceId: current.extensionInstanceId,
-          linkToken: msg.linkToken,
-        }),
-      });
-
-      if (!res.ok) {
-        console.error("[ExtLink] Link failed:", res.status);
-        postExtensionMessage({
-          type: "EXTENSION_LINK_RESULT",
-          requestId: msg.requestId,
-          ok: false,
-          status: res.status,
-        });
-        return;
-      }
-
-      const data = await res.json();
-      if (!data.extensionAuthToken) {
-        console.error("[ExtLink] extensionAuthToken not found in response");
-        postExtensionMessage({
-          type: "EXTENSION_LINK_RESULT",
-          requestId: msg.requestId,
-          ok: false,
-          error: "MissingExtensionAuthToken",
-        });
-        return;
-      }
-
-      await saveConnectionState({
-        ...current,
-        extensionAuthToken: data.extensionAuthToken,
-        linked: true,
-        lastSyncAt: new Date().toISOString(),
-      });
-      console.log("[ExtLink] extension auth token stored");
-      postExtensionMessage({
-        type: "EXTENSION_LINK_RESULT",
-        requestId: msg.requestId,
-        ok: true,
-      });
-    } catch (err) {
-      console.error("[ExtLink] Error:", err);
-      postExtensionMessage({
-        type: "EXTENSION_LINK_RESULT",
-        requestId: msg.requestId,
-        ok: false,
-        error: String(err),
-      });
-    }
-  }
-
-  // ---- 認証状態確認 ----
-  if (msg.type === "EXTENSION_CHECK_AUTH") {
-    const { loggedIn } = await checkStoredAuthState();
-    postExtensionMessage({ type: "EXTENSION_AUTH_STATUS", requestId: msg.requestId, loggedIn });
   }
 });
 

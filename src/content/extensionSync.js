@@ -478,7 +478,7 @@ export async function handleExtensionAuthStatusRequest(message, targetOrigin = w
 export async function handleExtensionLinkWithAuthToken(message) {
   const saved = await saveExtensionAuthToken(
     message?.extensionInstanceId,
-    message?.token
+    message?.token ?? message?.extensionAuthToken
   );
 
   if (saved) {
