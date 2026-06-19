@@ -120,10 +120,6 @@ function parseResponseJson(response) {
     .catch(() => null);
 }
 
-function arrayFromResponse(value) {
-  return Array.isArray(value) ? value : [];
-}
-
 function collectClientItemIds(value, ids = new Set()) {
   if (!value || typeof value !== 'object') return ids;
 
@@ -341,11 +337,12 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   });
 
   if (response.status === 200) {
-    const acceptedItemIds = arrayFromResponse(data?.acceptedItemIds);
-    const syncedItemIds =
-      acceptedItemIds.length > 0
-        ? acceptedItemIds
-        : pendingClips.map((clip) => clip.clientItemId);
+    // フィールドが存在すればそれが権威的（空配列＝受理ゼロなので何も削除しない）。
+    // フィールド自体が無いレガシー応答のときだけ、従来どおり全送信分を削除する。
+    const hasAcceptedField = Array.isArray(data?.acceptedItemIds);
+    const syncedItemIds = hasAcceptedField
+      ? data.acceptedItemIds
+      : pendingClips.map((clip) => clip.clientItemId);
     await removePendingClipIds(syncedItemIds);
     await storageSet({ [STORAGE_KEYS.lastSyncAt]: new Date().toISOString() });
     return { ok: true, acceptedCount: syncedItemIds.length };
