@@ -12,8 +12,8 @@
   ],
 
   "host_permissions": [
-    "http://localhost/*",
-    "http://127.0.0.1/*",
+    "http://localhost:3000/*",
+    "http://127.0.0.1:3000/*",
     "https://www.netflix.com/*",
     "https://www.disneyplus.com/*"
   ],
@@ -40,7 +40,7 @@
       "js": ["dist/content_disney.js"]
     },
     {
-      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "matches": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
       "run_at": "document_idle",
       "js": ["dist/extension_link.js", "src/content/getClipData.js"]
     }

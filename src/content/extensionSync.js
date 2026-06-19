@@ -368,6 +368,9 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   if (response.status === 401) {
     await clearExtensionAuthToken();
     console.warn('[extension-sync] auth token rejected; cleared token and kept queue');
+    if (openLoginIfMissingToken) {
+      await openExtensionLoginPage();
+    }
     return { ok: false, queued: true, reason: 'unauthorized' };
   }
 

@@ -3,6 +3,18 @@ import {
   handleExtensionLinkWithAuthToken,
   checkAndRenewToken,
 } from './extensionSync.js';
+import { SITE_ORIGIN } from './../api.js';
+
+// 認証ブリッジのメッセージを受け付ける信頼済みオリジン（アプリ本体のみ）。
+// manifest を絞っていても、別ポート等で読み込まれた場合の多層防御として検証する。
+const TRUSTED_ORIGINS = new Set([
+  SITE_ORIGIN,
+  SITE_ORIGIN.replace('//localhost', '//127.0.0.1'),
+]);
+
+function isTrustedOrigin(origin) {
+  return TRUSTED_ORIGINS.has(origin);
+}
 
 console.log('[extension-link] content script loaded on', location.href);
 
@@ -13,6 +25,7 @@ window.__CLIP_EXTENSION_PRESENT__ = true;
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
+  if (!isTrustedOrigin(event.origin)) return;
 
   const data = event.data;
   if (!data || typeof data !== 'object') return;
@@ -36,6 +49,7 @@ window.addEventListener('message', (event) => {
 
 window.addEventListener('message', async (event) => {
   if (event.source !== window) return;
+  if (!isTrustedOrigin(event.origin)) return;
 
   const data = event.data;
   if (!data || typeof data !== 'object') return;
