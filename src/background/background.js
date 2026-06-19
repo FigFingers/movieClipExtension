@@ -101,11 +101,24 @@ chrome.runtime.onConnect.addListener((port) => {
         port.postMessage({ ok: false, message: chrome.runtime.lastError.message });
         return;
       }
-      const extensionInstanceId = result.extensionInstanceId || crypto.randomUUID();
-      if (!result.extensionInstanceId) {
-        chrome.storage.local.set({ extensionInstanceId });
+
+      if (result.extensionInstanceId) {
+        port.postMessage({ ok: true, extensionInstanceId: result.extensionInstanceId });
+        return;
       }
-      port.postMessage({ ok: true, extensionInstanceId });
+
+      // 初回リンク時は生成した ID の永続化を待ってから応答する。
+      // 先に応答すると、ページがトークンを往復させた際に saveExtensionAuthToken() 側の
+      // getOrCreateExtensionInstanceId() が書き込み前の storage を読んで別 ID を生成し、
+      // instanceId 不一致でトークンが拒否される競合が起きるため。
+      const extensionInstanceId = crypto.randomUUID();
+      chrome.storage.local.set({ extensionInstanceId }, () => {
+        if (chrome.runtime.lastError) {
+          port.postMessage({ ok: false, message: chrome.runtime.lastError.message });
+          return;
+        }
+        port.postMessage({ ok: true, extensionInstanceId });
+      });
     });
   });
 });
