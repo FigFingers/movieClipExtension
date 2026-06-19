@@ -20,8 +20,8 @@ console.log('[extension-link] content script loaded on', location.href);
 
 checkAndRenewToken();
 
-// サイト側 ExtensionLinker が検知できるようにする
-window.__CLIP_EXTENSION_PRESENT__ = true;
+// 検知フラグ __CLIP_EXTENSION_PRESENT__ は MAIN world (extension_present.js) で公開する。
+// この content script は isolated world で動くため、ここで代入してもページからは見えない。
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
