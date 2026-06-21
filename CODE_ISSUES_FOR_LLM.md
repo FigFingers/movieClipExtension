@@ -23,6 +23,20 @@
 2. 次に `LLM Danger Zones` を読む
 3. 実際に直すときは `Quick Wins` と `Suggested Refactor Order` を使う
 
+## 対応済み (PR #115: 拡張⇄サイト連携の認証)
+
+以下は PR #115 で解決済み。**再指摘しないこと**。詳細はコミットと該当ファイルを参照。
+
+| 内容 | 状態 | commit | 主な該当箇所 |
+| --- | --- | --- | --- |
+| localhost content script が全ポートに注入され、無関係なローカルアプリからインスタンスID取得・トークン上書きが可能だった | ✅ 対応済み | `e27a4d5` | `manifest.json`(`:3000` 限定), `src/content/extension_link.js`(`isTrustedOrigin` 許可リスト) |
+| 401(トークン失効)時に再ログイン導線が出ず同期が無言で停滞 | ✅ 対応済み | `e27a4d5` | `src/content/extensionSync.js#performSyncPendingQueue()` |
+| sync 200 + `acceptedItemIds: []`(受理ゼロ)でキュー全削除 | ✅ 対応済み | `82a9042` | `src/content/extensionSync.js` (フィールド有無を区別) |
+| 初回リンク時 instanceID を永続化前に応答し、トークン往復で不一致拒否 | ✅ 対応済み | `d317c1a` | `src/background/background.js` (`set` callback 待ち) |
+| 検知フラグ `__CLIP_EXTENSION_PRESENT__` が isolated world でページから不可視 | ✅ 対応済み | `3766adc` | `src/content/extension_present.js`(MAIN world), `manifest.json`, `src/content/extension_link.js` |
+| auth-status 経路(content)と port 経路(background)が別 UUID を生成する instanceID 二重生成 | ✅ 対応済み | `7f09db5` | `src/background/background.js`(単一生成器+in-flight Promise), `src/content/extensionSync.js#getOrCreateExtensionInstanceId()` |
+| `getTokenExpiryMs()` が base64url(`-`/`_`)を `atob` に渡して throw | ✅ 復号は対応済み | `7f09db5` | `src/content/extensionSync.js` (※自動更新自体は Medium Risk #11 のとおり別途未解決) |
+
 ## High Risk Issues
 
 ### 1. Netflix の single-clip handoff が repo 内で閉じていない
@@ -241,6 +255,7 @@
 - 問題: repo 単体では成立しない flow があるが、契約がコード内に散っている。
 - なぜ問題か: dead code に見えるものを削ると、外部連携が壊れる可能性がある。
 - 改善方針: API、message、cookie 契約を別資料として固定する。
+- 部分対応: 拡張⇄サイトの**認証連携**については PR #115 で契約を一部明確化済み（信頼オリジン許可リスト、instanceID 生成の background 一本化、`postMessage` ハンドシェイクへの集約）。詳細は冒頭「対応済み (PR #115)」を参照。clip 再生・cookie relay 系の暗黙契約は未対応。
 
 ## Fragile Areas
 
