@@ -168,9 +168,14 @@ export async function getOrCreateExtensionInstanceId() {
     return existingId;
   }
 
-  const extensionInstanceId = createUuid();
-  await storageSet({ [STORAGE_KEYS.extensionInstanceId]: extensionInstanceId });
-  return extensionInstanceId;
+  // 生成は background に一本化する。auth-status 経路と port 経路がそれぞれ空 storage を
+  // 読んで別 UUID を作ると instanceId 不一致でトークンが拒否されるため、ここでは自前生成
+  // せず background の直列化された生成器から取得する。
+  const response = await sendRuntimeMessage({ type: 'GET_OR_CREATE_INSTANCE_ID' });
+  if (response?.ok && response.extensionInstanceId) {
+    return response.extensionInstanceId;
+  }
+  throw new Error(response?.message || 'Failed to obtain extensionInstanceId');
 }
 
 export async function getExtensionInstanceId() {
@@ -420,9 +425,19 @@ export function syncPendingQueue(options = {}) {
 
 const RENEWAL_THRESHOLD_MS = 15 * 24 * 60 * 60 * 1000;
 
+function decodeBase64Url(segment) {
+  // JWT は base64url ('-' '_'・パディング無し)。atob は標準 base64 しか受け付けず、
+  // URL-safe 文字が含まれると throw するため、標準 base64 に変換してから復号する。
+  const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+  const paddingLength = (4 - (base64.length % 4)) % 4;
+  return atob(base64 + '='.repeat(paddingLength));
+}
+
 function getTokenExpiryMs(token) {
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
+    const segment = token.split('.')[1];
+    if (!segment) return null;
+    const payload = JSON.parse(decodeBase64Url(segment));
     return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
   } catch {
     return null;
