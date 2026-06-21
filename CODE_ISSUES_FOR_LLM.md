@@ -153,6 +153,15 @@
 - どう壊れるか: `startTime` 欠落、`order` 欠落、`url` 型不正で再生・遷移が壊れる。
 - 改善方針: read 時に正規化と必須 field validation を入れる。
 
+### 11. トークン自動更新 (`checkAndRenewToken`) が現状まったく機能しない
+
+- 問題: `src/content/extensionSync.js#checkAndRenewToken()` は JWT を前提に `getTokenExpiryMs()` で `exp` を読み、期限が近ければ更新する設計だが、現行サーバ (`react--site`) の `/api/extension/link` が返す `extensionAuthToken` は `randomBytes(32).toString("base64url")` の**不透明トークン（JWT ではない・`exp` を持たない）**。
+- なぜ危険か: 「自動更新がある」という前提でコードもレビューも進むが、実際には一度も更新が走らない。さらに更新リクエスト側も `POST /api/extension/link` に `linkToken` を送っておらず（サーバの `extensionLinkBodySchema` 必須）、応答の `data.token` も実際の返却フィールド `extensionAuthToken` とズレているため、仮に `exp` があっても更新は成立しない。
+- どう壊れるか: トークンは更新されないまま期限切れ／失効を迎える。救済は 401 時の再ログイン導線（本 PR で追加）に依存し、自動更新としては無言で no-op。
+- 補足: `getTokenExpiryMs()` の base64url 復号バグ（`-`/`_` で `atob` が throw）は PR #115 (commit `7f09db5`) で修正済み。ただし上記のとおり、それだけでは更新は機能しない。
+- 改善方針: サーバ側でトークンを **JWT 化（`exp` 付与）するか、専用の更新エンドポイントを用意**する方針を先に決める。そのうえで拡張側の更新リクエスト（`linkToken` の要否・応答フィールド名）をサーバ契約に合わせる。**サーバ側の方針決定が前提のため、拡張側だけでは閉じない。**
+- 関連箇所: `src/content/extensionSync.js#checkAndRenewToken()`, `#getTokenExpiryMs()` / `react--site` 側 `src/app/api/extension/link/route.ts`, `src/server/services/extensions.ts#generateOpaqueToken()`
+
 ## Low Risk Issues
 
 ### 1. 明らかな placeholder / stale 設定が残っている
