@@ -1,92 +1,76 @@
-// ======================================================
-// getClipData.js - localhost:3000 用 content script
-// ======================================================
-
-// ------------------------------------------------------
-// 初期化ログ
-// ------------------------------------------------------
-console.log("✅ getClipData.js: content script injected on", location.origin);
-console.log("📍 location:", location.href);
-console.log("📦 chrome.storage available:", typeof chrome?.storage);
-
 /** @typedef {import('../types/clip').CacheItem} CacheItem */
 
-// ------------------------------------------------------
-// カスタムイベント監視（clip選択・リスト読み込み）
-// ------------------------------------------------------
-window.addEventListener("clipListElementsRendered", () => {
-});
-
 window.addEventListener("clipSelected", () => {
-  console.log("🎬 このclipを選択しました！");
   const playClipData = getCookies();
-  console.log("🍪 Cookies on video:", playClipData);
-
   chrome.storage.local.set({ clip: playClipData });
   chrome.storage.local.set({ playClipSystemKey: 1 });
   safeSetStorage({ playmode: "clip" });
-
-  chrome.storage.local.get(["playClipSystemKey"], (result) => {
-    console.log("🔑 再生機能の起動キー:", result.playClipSystemKey);
-  });
 });
 
 // ------------------------------------------------------
 // Chrome storage 安全書き込みユーティリティ
 // ------------------------------------------------------
+const SENSITIVE_LOG_KEYS = new Set([
+  "authorization",
+  "extensionauthtoken",
+]);
+
+function sanitizeForLog(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForLog(item));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      SENSITIVE_LOG_KEYS.has(key.toLowerCase()) ? "[redacted]" : sanitizeForLog(item),
+    ])
+  );
+}
+
 async function safeSetStorage(data) {
   try {
-    // 直接 local に書き込む（localhostでも確実に動く）
     await chrome.storage.local.set(data);
-    console.log("✅ [EXT] chrome.storage.local.set:", data);
   } catch (err) {
-    console.warn("⚠️ safeSetStorage direct failed:", err);
-    if (chrome.runtime?.id) {
-      console.log("➡️ Fallback to background relay");
-      await chrome.runtime.sendMessage({ type: "SET_SESSION_DATA", payload: data });
-    } else {
-      console.log("➡️ Fallback to window.localStorage");
-      localStorage.setItem("ext_fallback", JSON.stringify(data));
-    }
+    console.warn("[EXT] chrome.storage.local.set failed:", sanitizeForLog(data), err);
   }
 }
 
 // ------------------------------------------------------
 // window.postMessage 受信ハンドラ
 // ------------------------------------------------------
+// 認証・連携 (EXTENSION_CHECK_AUTH / EXT_LINK_WITH_AUTH_TOKEN / instanceId 発行) は
+// extension_link.js + extensionSync.js に一本化。getClipData.js は再生専用 (refs #110)。
+
 window.addEventListener("message", async (event) => {
   if (event.source !== window) return;
+  if (event.origin !== window.location.origin) return;
   const msg = event.data;
+  if (!msg || typeof msg.type !== "string") return;
 
   // ---- クリップデータ受信 ----
   if (msg.type === "SET_CLIP_DATA") {
-    const { clip, playClipSystemKey } = msg.payload;
-    await chrome.storage.local.set({ clip});
+    const { clip } = msg.payload;
+    await chrome.storage.local.set({ clip });
     await safeSetStorage({ playmode: "clip" });
-    // clip再生開始時に
-    chrome.storage.local.set({playClipSystemKey: 1,playlistSystemKey: 0});
-    console.log("🎞️ clipデータを保存:", clip, playClipSystemKey);
+    chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
   }
 
   // ---- プレイリスト再生開始 ----
   if (msg.type === "PLAY_PLAYLIST_START") {
-    console.log("🎬 PLAY_PLAYLIST_START 受信");
-
-    // localStorage から playQueue を取得
     const stored = localStorage.getItem("playQueue");
     const queue = stored ? JSON.parse(stored) : null;
 
     if (!queue || !Array.isArray(queue) || queue.length === 0) {
-      console.warn("⚠️ プレイキューが空です");
+      console.warn("[EXT] PLAY_PLAYLIST_START: playQueue が空です");
       return;
     }
 
-    console.log("🧩 プレイキュー全体:", queue);
-
-    // 🎯 playQueue 全体を拡張ストレージに保存（別ドメインからも参照可能に）
     await safeSetStorage({ playQueue: queue, currentClipOrder: 0, playmode: "playlist" });
-    console.log("💾 playQueue 全体を chrome.storage.local に保存しました");
-
     playQueue(queue);
   }
 
@@ -162,7 +146,7 @@ function appendStartTimeParam(baseUrl, paramKey, startTime) {
     urlObj.searchParams.set(paramKey, String(startTime));
     return urlObj.toString();
   } catch (error) {
-    console.warn("⚠️ URL 解析に失敗しました:", baseUrl, error);
+    console.warn("[EXT] URL 解析に失敗しました:", baseUrl, error);
     return baseUrl;
   }
 }
@@ -186,67 +170,31 @@ function buildServiceUrl(service, rawUrl, startTime, paramKey = "t") {
  * @param {CacheItem[]} queue
  */
 async function playQueue(queue) {
-  console.log("▶️ Playing queue:", queue);
-
   if (!Array.isArray(queue) || queue.length === 0) {
-    console.warn("⚠️ キューが空です");
+    console.warn("[EXT] playQueue: キューが空です");
     return;
   }
 
-  // orderが最も小さい要素を選択
   /** @type {CacheItem} */
   const nextClip = queue.reduce((min, item) =>
     item.order < min.order ? item : min
   );
 
-  console.log("🎯 Next clip to play:", nextClip);
-
   const normalizedService = normalizeService(nextClip.service);
   const startTime = Math.floor(nextClip.startTime) || 0;
-
-  const serviceLogMessages = {
-    netflix: "📺 Netflix のクリップを再生します",
-    prime: "📺 Prime のクリップを再生します",
-    disneyplus: "📺 Disney+ のクリップを再生します",
-    youtube: "📺 YouTube のクリップを再生します"
-  };
-
-  function notifyUnsupportedService(targetService) {
-    const message = `未対応のサービスです: ${targetService || "unknown"}`;
-    console.warn("⚠️", message);
-    window.alert(`⚠️ ${message}`);
-  }
-
-  const logMessage = serviceLogMessages[normalizedService];
-  if (logMessage) {
-    console.log(logMessage);
-  }
-
   const url = buildServiceUrl(normalizedService, nextClip.url, startTime, "t");
+
   if (!url) {
-    notifyUnsupportedService(normalizedService);
+    const message = `未対応のサービスです: ${normalizedService || "unknown"}`;
+    console.warn("[EXT]", message);
+    window.alert(message);
     return;
   }
 
-  // 🎯 再生情報を保存（playmode/nextClip）
-  try {
-    await safeSetStorage({ playmode: "playlist", nextClip });
-    console.log("✅ 再生情報を保存しました:", nextClip);
-  } catch (err) {
-    console.error("❌ safeSetStorage 失敗:", err);
-  }
+  await safeSetStorage({ playmode: "playlist", nextClip });
 
-  if (!url) return console.warn("⚠️ URL が無効のため遷移をスキップ");
-
-  // 遷移（遅延で確実にstorage書き込み完了後）
   setTimeout(() => {
-    // playlist再生開始時に
-    chrome.storage.local.set({playClipSystemKey: 0,playlistSystemKey: 1});
-    chrome.storage.local.set({ currentClipOrder: 0 }, () => {
-      console.log("🧭 currentClipOrder 初期化完了");
-    });
-
-    console.log("🌐 Navigating to:", url);
-    window.location.href = url; 
+    chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, currentClipOrder: 0 });
+    window.location.href = url;
   }, 300);
 }

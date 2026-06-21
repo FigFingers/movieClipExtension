@@ -13,7 +13,9 @@
 
   "host_permissions": [
     "http://localhost:3000/*",
-    "https://www.netflix.com/*"  
+    "http://127.0.0.1:3000/*",
+    "https://www.netflix.com/*",
+    "https://www.disneyplus.com/*"
   ],
 
   "background": {
@@ -38,9 +40,15 @@
       "js": ["dist/content_disney.js"]
     },
     {
-      "matches": ["http://localhost:3000/*"],
+      "matches": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
       "run_at": "document_idle",
-      "js": ["src/content/getClipData.js"]
+      "js": ["dist/extension_link.js", "src/content/getClipData.js"]
+    },
+    {
+      "matches": ["http://localhost:3000/*", "http://127.0.0.1:3000/*"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "js": ["src/content/extension_present.js"]
     }
   ],
 
