@@ -1,4 +1,7 @@
-import { getApiEndpoint } from './../api.js';
+import {
+  enqueueClip,
+  syncPendingQueue,
+} from './extensionSync.js';
 
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
 export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
@@ -54,23 +57,15 @@ export async function requestSeek({ service = detectService(), seconds, adapter,
   return { ok: false };
 }
 
-export function sendData(dataToSend) {
-  return fetch(getApiEndpoint('receive'), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(dataToSend),
-  })
-    .then((response) => response.json())
-    .then((data) => {
-      console.log('Success:', data);
-      return data;
-    })
-    .catch((error) => {
-      console.error('Error:', error);
-      throw error;
-    });
+export async function sendData(dataToSend) {
+  const queuedClip = await enqueueClip(dataToSend);
+  const syncResult = await syncPendingQueue({ openLoginIfMissingToken: true });
+  return {
+    ok: syncResult?.ok === true,
+    queued: true,
+    clientItemId: queuedClip.clientItemId,
+    syncResult,
+  };
 }
 
 export function openMemoSidebar({
