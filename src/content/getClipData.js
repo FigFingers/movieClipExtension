@@ -74,10 +74,8 @@ window.addEventListener("message", async (event) => {
     playQueue(queue);
   }
 
-  // ---- 外部から直接ストレージ設定 ----
-  if (msg.type === "EXT/SET_SESSION") {
-    await safeSetStorage(msg.payload);
-  }
+  // EXT/SET_SESSION ハンドラは削除済み (issue #98)。ペイロードを無検証で
+  // chrome.storage.local に書き込める経路であり、サイト側も送信していなかった。
 });
 
 // ------------------------------------------------------
