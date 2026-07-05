@@ -6,6 +6,7 @@ module.exports = {
     content: "./src/content/content_netflix.js",
     content_disney: "./src/content/content_disney.js",
     extension_link: "./src/content/extension_link.js",
+    background: "./src/background/background.js",
   },
   output: {
     filename: "[name].js",

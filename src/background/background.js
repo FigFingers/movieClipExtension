@@ -1,8 +1,16 @@
+import { syncPendingQueue } from './sync.js';
+import { checkAndRefreshToken } from './tokenRefresh.js';
+
 const DEMO_BASE_URL = 'http://localhost:3000/';
 const WELCOME_VERSION_KEY = 'lastSeenWelcomeVersion';
 const WHATSNEW_VERSION_KEY = 'lastSeenWhatsNewVersion';
 const LAST_SHOWN_AT_KEY = 'lastShownAt';
 const DEMO_COOLDOWN_MS = 5 * 60 * 1000;
+
+const TOKEN_REFRESH_ALARM = 'extension-token-refresh';
+const SYNC_RETRY_ALARM = 'extension-sync-retry';
+const TOKEN_REFRESH_PERIOD_MINUTES = 6 * 60;
+const SYNC_RETRY_PERIOD_MINUTES = 15;
 
 function getMajor(v) {
   return parseInt(String(v).split('.')[0] || '0', 10);
@@ -26,18 +34,47 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+// クリップ同期は background で fetch する(content の fetch はページオリジンの CORS で
+// サイト API に弾かれるため)。ログインタブ起動も sync 側(openLoginTab)が直接行う。
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'OPEN_EXTENSION_LOGIN') return;
+  if (message?.type !== 'SYNC_PENDING_CLIPS') return;
 
-  const fallbackUrl = `${DEMO_BASE_URL}login`;
-  const requestedUrl = typeof message.url === 'string' ? message.url : fallbackUrl;
-  const url = requestedUrl.startsWith(DEMO_BASE_URL) ? requestedUrl : fallbackUrl;
-
-  createTab(url)
-    .then(() => sendResponse({ ok: true }))
-    .catch((error) => sendResponse({ ok: false, error: error?.message }));
+  syncPendingQueue(message.options || {})
+    .then((result) => sendResponse(result))
+    .catch((error) => sendResponse({
+      ok: false,
+      queued: true,
+      reason: 'sync_error',
+      message: error?.message,
+    }));
 
   return true;
+});
+
+function scheduleAlarms() {
+  chrome.alarms.create(TOKEN_REFRESH_ALARM, { periodInMinutes: TOKEN_REFRESH_PERIOD_MINUTES });
+  chrome.alarms.create(SYNC_RETRY_ALARM, { periodInMinutes: SYNC_RETRY_PERIOD_MINUTES });
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === TOKEN_REFRESH_ALARM) {
+    void checkAndRefreshToken();
+    return;
+  }
+  if (alarm.name === SYNC_RETRY_ALARM) {
+    // キューが空なら storage を1回読むだけで即終了するので低コスト。
+    void syncPendingQueue();
+  }
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  scheduleAlarms();
+});
+
+// SW が起きたタイミングで期限チェックと積み残しの再送を行う(どちらも未連携・空キュー
+// なら即終了)。refresh を先に済ませ、旧トークンでの sync 401 を避ける。
+checkAndRefreshToken().finally(() => {
+  void syncPendingQueue();
 });
 
 async function handleInstalledDemo(details) {
@@ -89,6 +126,7 @@ async function handleInstalledDemo(details) {
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
+  scheduleAlarms();
   void handleInstalledDemo(details);
 });
 
