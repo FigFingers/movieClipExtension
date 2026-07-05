@@ -37,6 +37,20 @@
 | auth-status 経路(content)と port 経路(background)が別 UUID を生成する instanceID 二重生成 | ✅ 対応済み | `7f09db5` | `src/background/background.js`(単一生成器+in-flight Promise), `src/content/extensionSync.js#getOrCreateExtensionInstanceId()` |
 | `getTokenExpiryMs()` が base64url(`-`/`_`)を `atob` に渡して throw | ✅ 復号は対応済み | `7f09db5` | `src/content/extensionSync.js` (※自動更新自体は Medium Risk #11 のとおり別途未解決) |
 
+## 対応済み (feature/token-lifecycle-and-bg-sync: トークンライフサイクル+background同期)
+
+以下は本ブランチで解決済み。**再指摘しないこと**。サイト側 (`react--site`) の対応とセットで機能する。
+
+| 内容 | 状態 | 主な該当箇所 |
+| --- | --- | --- |
+| 同期 fetch が content script 実行のため、Netflix/Disney オリジンからはサイト API の Origin 許可リストに弾かれて恒久失敗(CORS 403 → クリップが `pendingClips` に永久滞留) | ✅ 対応済み | 同期 fetch を background へ移設: `src/background/sync.js`(新設), `src/content/extensionSync.js#syncPendingQueue()`(runtime message 化), `manifest.json`(`dist/background.js`)。サイト側 `.env.local` の `CLIP_API_ALLOWED_ORIGINS` に `chrome-extension://<拡張ID>` の登録が必要(README 参照) |
+| トークン自動更新が非機能(旧 Medium Risk #11) | ✅ 対応済み | サーバに `expires_at` + `POST /api/extension/token/refresh`(ローテーション)を新設。拡張は `src/background/tokenRefresh.js`(新設)が 6 時間毎+SW 起動時に残り 15 日未満で更新。旧 JWT 復号コード(`decodeBase64Url`/`getTokenExpiryMs`/`checkAndRenewToken`)は全廃(issue #99 も消滅) |
+| `EXT/SET_SESSION` がペイロードを無検証で `chrome.storage.local` に丸ごと書き込み(issue #98) | ✅ 対応済み(削除) | `src/content/getClipData.js`(サイト側が一切送信していないためハンドラごと削除) |
+| 連携解除の手段が無い | ✅ 対応済み | サイト `/account` に解除 UI + `POST /api/extension/unlink`。拡張は `EXTENSION_UNLINKED` postMessage で即時トークン破棄(`src/content/extension_link.js`)、取り逃しても次回同期の 401 で自己修復 |
+| 同期の再送機会が「次の保存操作」しか無い | ✅ 対応済み | `chrome.alarms`(15 分毎)+ SW 起動時に `pendingClips` を flush(`src/background/background.js`) |
+
+トークン仕様(現行): サーバ発行の不透明トークン(`randomBytes(32).base64url`、DB には sha256 ハッシュのみ)。有効期限 90 日、`expiresAt` は link/refresh 応答と `EXT_LINK_WITH_AUTH_TOKEN` postMessage で拡張へ伝搬し、`chrome.storage.local.extensionTokenExpiresAt` に保存。refresh はローテーション式(旧トークンは即失効)で、background 内の `runExclusive` が sync と refresh を直列化して旧トークン 401 の競合を防ぐ。
+
 ## High Risk Issues
 
 ### 1. Netflix の single-clip handoff が repo 内で閉じていない
@@ -167,14 +181,10 @@
 - どう壊れるか: `startTime` 欠落、`order` 欠落、`url` 型不正で再生・遷移が壊れる。
 - 改善方針: read 時に正規化と必須 field validation を入れる。
 
-### 11. トークン自動更新 (`checkAndRenewToken`) が現状まったく機能しない
+### 11. ~~トークン自動更新 (`checkAndRenewToken`) が現状まったく機能しない~~ → 解決済み
 
-- 問題: `src/content/extensionSync.js#checkAndRenewToken()` は JWT を前提に `getTokenExpiryMs()` で `exp` を読み、期限が近ければ更新する設計だが、現行サーバ (`react--site`) の `/api/extension/link` が返す `extensionAuthToken` は `randomBytes(32).toString("base64url")` の**不透明トークン（JWT ではない・`exp` を持たない）**。
-- なぜ危険か: 「自動更新がある」という前提でコードもレビューも進むが、実際には一度も更新が走らない。さらに更新リクエスト側も `POST /api/extension/link` に `linkToken` を送っておらず（サーバの `extensionLinkBodySchema` 必須）、応答の `data.token` も実際の返却フィールド `extensionAuthToken` とズレているため、仮に `exp` があっても更新は成立しない。
-- どう壊れるか: トークンは更新されないまま期限切れ／失効を迎える。救済は 401 時の再ログイン導線（本 PR で追加）に依存し、自動更新としては無言で no-op。
-- 補足: `getTokenExpiryMs()` の base64url 復号バグ（`-`/`_` で `atob` が throw）は PR #115 (commit `7f09db5`) で修正済み。ただし上記のとおり、それだけでは更新は機能しない。
-- 改善方針: サーバ側でトークンを **JWT 化（`exp` 付与）するか、専用の更新エンドポイントを用意**する方針を先に決める。そのうえで拡張側の更新リクエスト（`linkToken` の要否・応答フィールド名）をサーバ契約に合わせる。**サーバ側の方針決定が前提のため、拡張側だけでは閉じない。**
-- 関連箇所: `src/content/extensionSync.js#checkAndRenewToken()`, `#getTokenExpiryMs()` / `react--site` 側 `src/app/api/extension/link/route.ts`, `src/server/services/extensions.ts#generateOpaqueToken()`
+- **feature/token-lifecycle-and-bg-sync で解決済み。再指摘しないこと。** 詳細は冒頭の「対応済み (feature/token-lifecycle-and-bg-sync)」を参照。
+- 採用した方針: サーバ側に `linked_extensions.expires_at`(90日)と専用更新エンドポイント `POST /api/extension/token/refresh`(Bearer 認証・トークンローテーション)を新設し、拡張側は `src/background/tokenRefresh.js` が期限を storage の `extensionTokenExpiresAt` で管理して自動更新する。JWT 前提の旧コード(`checkAndRenewToken`/`getTokenExpiryMs`/`decodeBase64Url`)は削除済み。
 
 ## Low Risk Issues
 
