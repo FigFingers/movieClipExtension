@@ -228,8 +228,6 @@ function initializeNetflixPlayback() {
     }
   }
 
-  try { chrome.runtime.sendMessage({ type: "nf:init-bridge" }); } catch(e) { /* noop */ }
-
   // ---------------------------------------------------------------------------
   // UI生成
   // ---------------------------------------------------------------------------
@@ -365,15 +363,20 @@ function initializeNetflixPlayback() {
    * @param {ClipListProps} props
    */
   function renderClipList(container, { items, onSelect }) {
-    container.innerHTML = "";
+    container.replaceChildren();
     for (const item of items) {
       const entry = document.createElement("div");
       entry.style.cssText = "border-bottom:1px solid #555;padding:4px 0;";
-      entry.innerHTML = `
-          <div><strong>${item.title}（${item.epnumber}）</strong></div>
-          <div>ユーザー: ${item.user}</div>
-          <div>範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}</div>
-        `;
+      // API 由来の文字列を扱うため innerHTML は使わない (refs #97)
+      const heading = document.createElement("div");
+      const headingText = document.createElement("strong");
+      headingText.textContent = `${item.title}（${item.epnumber}）`;
+      heading.appendChild(headingText);
+      const userRow = document.createElement("div");
+      userRow.textContent = `ユーザー: ${item.user}`;
+      const rangeRow = document.createElement("div");
+      rangeRow.textContent = `範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}`;
+      entry.append(heading, userRow, rangeRow);
       const jumpBtn = document.createElement("button");
       jumpBtn.textContent = "▶ このClipへジャンプ";
       jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
