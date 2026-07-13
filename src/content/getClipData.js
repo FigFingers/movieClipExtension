@@ -63,15 +63,34 @@ window.addEventListener("message", async (event) => {
   // ---- プレイリスト再生開始 ----
   if (msg.type === "PLAY_PLAYLIST_START") {
     const stored = localStorage.getItem("playQueue");
-    const queue = stored ? JSON.parse(stored) : null;
+    let queue = null;
+    try {
+      queue = stored ? JSON.parse(stored) : null;
+    } catch (err) {
+      console.warn("[EXT] PLAY_PLAYLIST_START: playQueue の JSON 解析に失敗しました", err);
+      return;
+    }
 
     if (!queue || !Array.isArray(queue) || queue.length === 0) {
       console.warn("[EXT] PLAY_PLAYLIST_START: playQueue が空です");
       return;
     }
 
-    await safeSetStorage({ playQueue: queue, currentClipOrder: 0, playmode: "playlist" });
-    playQueue(queue);
+    // サイト側の playQueue は表示順の配列で order フィールドを持たない。
+    // 再生側 (content_netflix / content_disney) は order を正として現在位置・次クリップを
+    // 解決するため、欠落時は配列添字で補完しておく（order 付きで来た場合はそれを尊重）。
+    const normalizedQueue = queue.map((item, index) => ({
+      ...item,
+      order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index,
+    }));
+
+    const firstOrder = normalizedQueue.reduce(
+      (min, item) => (item.order < min ? item.order : min),
+      normalizedQueue[0].order
+    );
+
+    await safeSetStorage({ playQueue: normalizedQueue, currentClipOrder: firstOrder, playmode: "playlist" });
+    playQueue(normalizedQueue);
   }
 
   // EXT/SET_SESSION ハンドラは削除済み (issue #98)。ペイロードを無検証で
@@ -192,7 +211,12 @@ async function playQueue(queue) {
   await safeSetStorage({ playmode: "playlist", nextClip });
 
   setTimeout(() => {
-    chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, currentClipOrder: 0 });
+    // 再生開始位置は先頭固定(0)ではなく、実際に選んだ最小 order のクリップに合わせる。
+    chrome.storage.local.set({
+      playClipSystemKey: 0,
+      playlistSystemKey: 1,
+      currentClipOrder: Number.isFinite(Number(nextClip.order)) ? Number(nextClip.order) : 0,
+    });
     window.location.href = url;
   }, 300);
 }
