@@ -195,15 +195,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // Netflix プレイヤーへのシーク（content script から {type:"seek", sec} を受け取る）
-chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
+// リスナーを async にすると戻り値が Promise になり `return true` が効かず応答ポートが
+// 閉じるため、同期リスナー + 内部 async 関数の形にしている。
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type !== 'seek') return;
 
   const sec = Number(msg.sec);
   if (!Number.isFinite(sec)) return;
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return;
-  if (!/^https:\/\/www\.netflix\.com\/watch\//.test(tab.url || '')) return;
+  handleSeekMessage(sec, sender)
+    .then((result) => sendResponse(result))
+    .catch((error) => sendResponse({ ok: false, message: error?.message }));
+
+  return true; // 非同期応答
+});
+
+async function handleSeekMessage(sec, sender) {
+  // seek 要求は Netflix タブの content script から来るため、送信元タブを優先する。
+  // active tab 参照だと、再生タブが非アクティブのとき seek されない・別タブへ誤送出する。
+  let tab = sender?.tab;
+  if (!tab?.id) {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  }
+  if (!tab?.id) return { ok: false, reason: 'no_tab' };
+  if (!/^https:\/\/www\.netflix\.com\/watch\//.test(tab.url || '')) {
+    return { ok: false, reason: 'not_netflix_watch' };
+  }
 
   await chrome.scripting.executeScript({
     target: { tabId: tab.id },
@@ -236,6 +253,5 @@ chrome.runtime.onMessage.addListener(async (msg, sender, sendResponse) => {
     },
   });
 
-  sendResponse({ ok: true });
-  return true;
-});
+  return { ok: true };
+}
