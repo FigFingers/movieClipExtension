@@ -82,18 +82,56 @@ import {
 
     await chrome.storage.local.set(update);
   }
+
+  // === Disney+ DOM ヘルパー（Shadow DOM 対応） ===
+  // 現行プレイヤーは <main-app-controls-overlay> の shadowRoot 配下にコントロール・
+  // タイトル・プログレスバーを描画する。各要素はさらに独自の shadowRoot を持つため、
+  // document 直下の querySelector では取得できない。
+  function getOverlayRoot() {
+    return document.querySelector('main-app-controls-overlay')?.shadowRoot || null;
+  }
+
+  function getTitleBugRoot() {
+    return getOverlayRoot()?.querySelector('title-bug')?.shadowRoot || null;
+  }
+
+  function getProgressBar() {
+    return getOverlayRoot()?.querySelector('progress-bar') || null;
+  }
+
+  // 再生位置スライダー。role="slider" で aria-valuenow / aria-valuemax（秒）を保持し、
+  // シーク時のポインタターゲットも兼ねる。
+  function getProgressSlider() {
+    return getProgressBar()?.shadowRoot?.querySelector('.progress-bar__seekable-range') || null;
+  }
+
+  // 実際に再生している video は #hivePlayer1 (.hive-video)。
+  // 先頭の <video style="display:none"> は src を持たないダミーなので優先的に避ける。
+  function getVideoElement() {
+    return (
+      document.querySelector('video.hive-video') ||
+      document.getElementById('hivePlayer1') ||
+      Array.from(document.querySelectorAll('video')).find((v) => v.currentSrc || v.src) ||
+      document.querySelector('video')
+    );
+  }
+
   // === UI ===
   const UI = (() => {
-    const PLAYER_CONTROLS_SELECTOR = '.controls__footer__wrapper';
-    const LEFT_CONTROLS_SELECTORS = [
-      '.controls__left',
-      '.controls__footer__left',
-      '.controls__column--left'
-    ];
-    const RIGHT_CONTROLS_SELECTORS = [
-      '.controls__right',
-      '.controls__footer__right',
-      '.controls__column--right'
+    // Disney+ の <pointer-actions> は、プレイヤー全面を覆う SVG パス
+    // (.pointer-mask-path, pointer-events:auto) でクリックを横取りし、ネイティブ操作
+    // ボタンの位置にだけ evenodd で「穴」を開けて通す。コントロール行に要素を挿しても
+    // この穴が無いため押せない。そこで <pointer-actions>/<main-app-controls-overlay> の
+    // 兄弟として「最後」に自前オーバーレイを差し込み、マスクより上に載せてクリックを成立させる。
+    // （フルスクリーンでも有効。Disney 側の要素は改変しない。）
+    const OVERLAY_ID = 'dext-overlay';
+    const BAR_ID = 'dext-bar';
+    // オーバーレイの挿入先（プレイヤー配下・フルスクリーン対象の内側）。上から順に試す。
+    const PLAYER_ROOT_SELECTORS = [
+      'disney-web-player-ui',
+      '.btm-media-clients',
+      '.player-container-root',
+      '.mini-player-inner'
     ];
     const HOST_IDS = {
       left: 'dext-control-host-left',
@@ -111,12 +149,34 @@ import {
     let observer = null;
     let injectionScheduled = false;
 
+    // オーバーレイは light DOM に置くため、スタイルは document.head で問題ない。
     function ensureStyle() {
       if (document.getElementById(STYLE_ID)) return;
 
       const style = document.createElement('style');
       style.id = STYLE_ID;
       style.textContent = `
+    /* --- マスクより上に載る自前オーバーレイ --- */
+    #${OVERLAY_ID} {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;         /* 素通し。ボタンだけ pointer-events:auto にする */
+      z-index: 2147483000;          /* Disney の pointer-mask より上 */
+    }
+
+    #${BAR_ID} {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 150px;                /* ネイティブのシークバー/操作行の上。必要に応じ調整 */
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      padding: 0 34px;
+      box-sizing: border-box;
+      pointer-events: none;
+    }
+
     /* --- Disney+ 風にクリックが通る構造 --- */
     .dext-button-container.button-container {
       display: inline-flex;
@@ -165,11 +225,12 @@ import {
       user-select: none;
     }
 
-    /* ホスト領域（左右にまとめる） */
+    /* ホスト領域（左右にまとめる）。バーは素通しなのでホストだけクリック可に戻す。 */
     .dext-host {
       display: inline-flex;
       gap: 8px;
       align-items: center;
+      pointer-events: auto;
     }
     .dext-host.dext-host--right {
       justify-content: flex-end;
@@ -184,41 +245,57 @@ import {
       (document.head || document.documentElement).appendChild(style);
     }
 
-    function querySelectorFromList(root, selectors) {
-      for (const selector of selectors) {
-        const node = root.querySelector(selector);
+    // プレイヤー配下（フルスクリーン対象の内側）を探す。
+    function getPlayerRoot() {
+      for (const selector of PLAYER_ROOT_SELECTORS) {
+        const node = document.querySelector(selector);
         if (node) {
           return node;
         }
       }
-      return null;
+      // 最後の手段: overlay ホスト要素の親（= disney-web-player-ui 相当）。
+      return document.querySelector('main-app-controls-overlay')?.parentElement || null;
     }
 
-    function ensureHost(area, controls) {
-      const hostId = HOST_IDS[area];
-      let host = document.getElementById(hostId);
-
-      if (host && controls.contains(host)) {
-        return host;
+    // マスクより上の自前オーバーレイ（#dext-overlay > #dext-bar > 左右ホスト）を用意する。
+    function ensureOverlay() {
+      const playerRoot = getPlayerRoot();
+      if (!playerRoot) {
+        return null;
       }
 
-      if (host && host.parentNode) {
-        host.parentNode.removeChild(host);
+      let overlay = document.getElementById(OVERLAY_ID);
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = OVERLAY_ID;
+
+        const bar = document.createElement('div');
+        bar.id = BAR_ID;
+
+        for (const area of ['left', 'right']) {
+          const host = document.createElement('div');
+          host.id = HOST_IDS[area];
+          host.className = `dext-host dext-host--${area}`;
+          bar.appendChild(host);
+        }
+
+        overlay.appendChild(bar);
       }
 
-      host = document.createElement('div');
-      host.id = hostId;
-      host.className = `dext-host dext-host--${area}`;
+      // playerRoot 配下に無い（新規/差し替え後）ときだけ付け直す。z-index でマスクより
+      // 上に出るため「最後の子」への固定は不要。毎回付け直すと observer ループになるので避ける。
+      if (overlay.parentNode !== playerRoot) {
+        playerRoot.appendChild(overlay);
+      }
 
-      const selectors = area === 'left' ? LEFT_CONTROLS_SELECTORS : RIGHT_CONTROLS_SELECTORS;
-      const targetContainer = querySelectorFromList(controls, selectors) || controls;
-      targetContainer.appendChild(host);
-
-      return host;
+      return {
+        left: overlay.querySelector(`#${HOST_IDS.left}`),
+        right: overlay.querySelector(`#${HOST_IDS.right}`)
+      };
     }
 
     function addButton(config, host) {
-      // これまでの「button要素にid」をやめて、コンテナにidを付けます
+      // コンテナに id を付ける。ホストは light DOM 配下なので document で検索できる。
       let container = document.getElementById(config.id);
 
       if (!container || !host.contains(container)) {
@@ -286,12 +363,14 @@ import {
         const t = Service.DPlusTime.get();
         const endtime = t?.currentSeconds;
 
-        const videoPlayer = document.querySelector('video');
+        const videoPlayer = getVideoElement();
         videoPlayer?.pause();
 
         const urldata = location.href;
-        const title = document.querySelector(".title-bug-container .title-field span")?.textContent.trim() || "";
-        const subtitle = document.querySelector(".title-bug-container .subtitle-field span")?.textContent.trim() || "";
+        // タイトル/サブタイトルは title-bug の shadowRoot 配下にある。
+        const titleRoot = getTitleBugRoot();
+        const title = titleRoot?.querySelector(".title-field span")?.textContent.trim() || "";
+        const subtitle = titleRoot?.querySelector(".subtitle-field span")?.textContent.trim() || "";
 
         const clipName = `${title}${subtitle ? `｜${subtitle}` : ""}`;
 
@@ -327,17 +406,17 @@ import {
     }
 
     function injectButtons() {
-      const controls = document.querySelector(PLAYER_CONTROLS_SELECTOR);
-      if (!controls) {
+      // プレイヤーが出るまで待つ（overlay の shadowRoot を目印にする）。
+      if (!getOverlayRoot()) {
         return;
       }
 
       ensureStyle();
 
-      const hosts = {
-        left: ensureHost('left', controls),
-        right: ensureHost('right', controls)
-      };
+      const hosts = ensureOverlay();
+      if (!hosts) {
+        return;
+      }
 
       for (const config of BUTTONS) {
         const host = hosts[config.area];
@@ -430,17 +509,13 @@ import {
           : `${m}:${String(s).padStart(2, "0")}`;
       }
 
-      function getThumb() {
-        const el = document.querySelector("progress-bar");
-        return el?.shadowRoot?.querySelector(".progress-bar__thumb") || null;
-      }
-
       function getTime() {
-        const thumb = getThumb();
-        if (!thumb) return null;
+        // aria-valuenow/valuemax（秒）は .progress-bar__seekable-range 側に付く。
+        const slider = getProgressSlider();
+        if (!slider) return null;
 
-        const current = Number(thumb.getAttribute("aria-valuenow"));
-        const total   = Number(thumb.getAttribute("aria-valuemax"));
+        const current = Number(slider.getAttribute("aria-valuenow"));
+        const total   = Number(slider.getAttribute("aria-valuemax"));
 
         if (!Number.isFinite(current) || !Number.isFinite(total)) return null;
 
@@ -473,9 +548,7 @@ import {
     function seek(seconds) {
       const t = DPlusTime.get();
       if (!t) return console.warn("再生時間が取得できません");
-      const bar = document.querySelector("progress-bar");
-      const root = bar?.shadowRoot;
-      const seekable = root?.querySelector(".progress-bar__seekable-range");
+      const seekable = getProgressSlider();
       if (!seekable) return console.warn("seekable-range が見つからない");
 
       const rect = seekable.getBoundingClientRect();
