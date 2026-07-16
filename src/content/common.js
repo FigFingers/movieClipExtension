@@ -10,7 +10,9 @@ export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
   if (host.includes('primevideo.com')) return 'Prime Video';
   if (host.includes('youtube.com')) return 'YouTube';
-  if (host.includes('disneyplus.com')) return 'DisneyPlus';
+  // サイト側 VOD 名(prisma seed: name "Disney+")と一致させる。'DisneyPlus' だと
+  // findActiveIdByLookup が code/name/alias いずれにも一致せず 404 になる。
+  if (host.includes('disneyplus.com')) return 'Disney+';
   if (host.includes('hulu.jp') || host.includes('hulu.com')) return 'Hulu';
   return 'Unknown';
 }
