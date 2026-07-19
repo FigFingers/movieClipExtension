@@ -66,11 +66,15 @@ function collectClientItemIds(value, ids = new Set()) {
   }
 
   if (Array.isArray(value)) {
-    value.forEach((item) => collectClientItemIds(item, ids));
+    value.forEach((item) => {
+      collectClientItemIds(item, ids);
+    });
     return ids;
   }
 
-  Object.values(value).forEach((item) => collectClientItemIds(item, ids));
+  Object.values(value).forEach((item) => {
+    collectClientItemIds(item, ids);
+  });
   return ids;
 }
 

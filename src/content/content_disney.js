@@ -559,7 +559,7 @@ import {
       const y = rect.top + rect.height / 2;
 
       // イベント発火
-      ["pointerdown", "pointerup"].forEach(type =>
+      ["pointerdown", "pointerup"].forEach(type => {
         seekable.dispatchEvent(
           new PointerEvent(type, {
             bubbles: true,
@@ -568,8 +568,8 @@ import {
             clientX: x,
             clientY: y
           })
-        )
-      );
+        );
+      });
     }
 
     return { DPlusTime, seek };
