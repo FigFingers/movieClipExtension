@@ -140,6 +140,14 @@ async function performCheckAndRefreshToken() {
   }
 
   if (response.status === 401) {
+    // fetch 中に再連携が起きていた場合、この 401 は旧トークンに対するもの(サイト側 CAS の
+    // 競合負け)であり、保存済みの新トークンを消すと連携直後の無言解除になる。
+    const current = await storageGet([STORAGE_KEYS.extensionAuthToken]);
+    if (current[STORAGE_KEYS.extensionAuthToken] !== token) {
+      console.log('[extension-sync] stale 401 for replaced token; keeping current token');
+      return { ok: false, reason: 'stale_unauthorized' };
+    }
+
     // 失効・解除・ローテーション競合負け。トークンを破棄し、次のユーザー操作時の
     // 再ログイン導線(sync の missing_token 経路)に任せる。
     // バックオフ状態は clearExtensionAuthState() が併せて削除する。
