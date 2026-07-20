@@ -26,7 +26,25 @@ function computeBackoffMs(failureCount, status) {
   return Math.min(BACKOFF_BASE_MS * 2 ** (failureCount - 1), BACKOFF_MAX_MS);
 }
 
-async function recordRefreshFailure(previousBackoff, status) {
+// 失敗を書き戻す直前に storage を読み直し、試行したトークンが今も保存されているか確認する。
+// fetch 中にユーザーが再連携すると saveExtensionAuthToken() が新トークンを保存しつつ
+// バックオフを削除するが、その保存は content 側で行われ runExclusive の外にあるため
+// 直列化されない。読み込み時点のスナップショットをそのまま書くと、削除済みのバックオフが
+// 復活して新しいトークンを最大24時間抑制してしまう。
+async function recordRefreshFailure(attemptedToken, status) {
+  const current = await storageGet([
+    STORAGE_KEYS.extensionAuthToken,
+    STORAGE_KEYS.extensionTokenRefreshBackoff,
+  ]);
+
+  if (current[STORAGE_KEYS.extensionAuthToken] !== attemptedToken) {
+    console.log('[extension-sync] token replaced during refresh; skipping backoff record', {
+      status: status ?? null,
+    });
+    return;
+  }
+
+  const previousBackoff = current[STORAGE_KEYS.extensionTokenRefreshBackoff] || null;
   const failureCount = Number(previousBackoff?.failureCount) > 0
     ? Number(previousBackoff.failureCount) + 1
     : 1;
@@ -106,7 +124,7 @@ async function performCheckAndRefreshToken() {
     console.warn('[extension-sync] token refresh failed; keeping current token', {
       message: error?.message,
     });
-    await recordRefreshFailure(backoff, null);
+    await recordRefreshFailure(token, null);
     return { ok: false, reason: 'network_error' };
   }
 
@@ -133,6 +151,6 @@ async function performCheckAndRefreshToken() {
   console.warn('[extension-sync] token refresh failed; keeping current token', {
     status: response.status,
   });
-  await recordRefreshFailure(backoff, response.status);
+  await recordRefreshFailure(token, response.status);
   return { ok: false, reason: 'refresh_failed' };
 }
