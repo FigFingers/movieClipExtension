@@ -10,7 +10,9 @@ export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
   if (host.includes('primevideo.com')) return 'Prime Video';
   if (host.includes('youtube.com')) return 'YouTube';
-  if (host.includes('disneyplus.com')) return 'DisneyPlus';
+  // サイト側 VOD 名(prisma seed: name "Disney+")と一致させる。'DisneyPlus' だと
+  // findActiveIdByLookup が code/name/alias いずれにも一致せず 404 になる。
+  if (host.includes('disneyplus.com')) return 'Disney+';
   if (host.includes('hulu.jp') || host.includes('hulu.com')) return 'Hulu';
   return 'Unknown';
 }
@@ -117,17 +119,26 @@ export function openMemoSidebar({
   infoBox.style.color = 'white';
   const start = Math.floor(data?.StartTime || 0);
   const end = Math.floor(data?.EndTime || 0);
-  infoBox.innerHTML = `
-    <div><b>タイトル:</b> ${data?.title || '(不明)'}</div>
-    <div><b>エピソード:</b> ${data?.epnumber || '-'}</div>
-    <div><b>サービス:</b> ${data?.service || '-'}</div>
-    <div><b>開始:</b> ${formatSeconds(start)}</div>
-    <div><b>終了:</b> ${formatSeconds(end)}</div>
-    <div><b>URL:</b> ${data?.URL || location.href}</div>`;
+  // ページ由来の文字列を扱うため innerHTML は使わない (refs #96)
+  const infoRows = [
+    ['タイトル', data?.title || '(不明)'],
+    ['エピソード', data?.epnumber || '-'],
+    ['サービス', data?.service || '-'],
+    ['開始', formatSeconds(start)],
+    ['終了', formatSeconds(end)],
+    ['URL', data?.URL || location.href],
+  ];
+  for (const [label, value] of infoRows) {
+    const row = document.createElement('div');
+    const labelEl = document.createElement('b');
+    labelEl.textContent = `${label}:`;
+    row.append(labelEl, ` ${value}`);
+    infoBox.appendChild(row);
+  }
   sb.appendChild(infoBox);
 
   const nameLabel = document.createElement('label');
-  nameLabel.style.cssText = 'font-size:12px;color:#000;';
+  nameLabel.style.cssText = 'font-size:12px;color:#fff;';
   nameLabel.textContent = '名前:';
   const nameInput = document.createElement('input');
   nameInput.style.cssText = 'width:100%;margin-top:4px;';

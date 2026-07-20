@@ -1,7 +1,7 @@
 import {
   handleExtensionAuthStatusRequest,
   handleExtensionLinkWithAuthToken,
-  checkAndRenewToken,
+  handleExtensionUnlinked,
 } from './extensionSync.js';
 import { SITE_ORIGIN } from './../api.js';
 
@@ -18,7 +18,8 @@ function isTrustedOrigin(origin) {
 
 console.log('[extension-link] content script loaded on', location.href);
 
-checkAndRenewToken();
+// トークンの期限チェック・自動リフレッシュは background(tokenRefresh.js)が
+// chrome.alarms と SW 起動時に行う。content 側では何もしない。
 
 // 検知フラグ __CLIP_EXTENSION_PRESENT__ は MAIN world (extension_present.js) で公開する。
 // この content script は isolated world で動くため、ここで代入してもページからは見えない。
@@ -56,7 +57,8 @@ window.addEventListener('message', async (event) => {
   if (
     data.type !== 'EXTENSION_AUTH_STATUS_REQUEST' &&
     data.type !== 'EXTENSION_CHECK_AUTH' &&
-    data.type !== 'EXT_LINK_WITH_AUTH_TOKEN'
+    data.type !== 'EXT_LINK_WITH_AUTH_TOKEN' &&
+    data.type !== 'EXTENSION_UNLINKED'
   ) return;
 
   try {
@@ -70,6 +72,11 @@ window.addEventListener('message', async (event) => {
 
     if (data.type === 'EXT_LINK_WITH_AUTH_TOKEN') {
       await handleExtensionLinkWithAuthToken(data);
+      return;
+    }
+
+    if (data.type === 'EXTENSION_UNLINKED') {
+      await handleExtensionUnlinked(data);
     }
   } catch (error) {
     console.warn('[extension-sync] failed to handle extension link message', {
