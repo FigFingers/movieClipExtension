@@ -26,32 +26,33 @@ function computeBackoffMs(failureCount, status) {
   return Math.min(BACKOFF_BASE_MS * 2 ** (failureCount - 1), BACKOFF_MAX_MS);
 }
 
-// 失敗を書き戻す直前に storage を読み直し、試行したトークンが今も保存されているか確認する。
-// fetch 中にユーザーが再連携すると saveExtensionAuthToken() が新トークンを保存しつつ
-// バックオフを削除するが、その保存は content 側で行われ runExclusive の外にあるため
-// 直列化されない。読み込み時点のスナップショットをそのまま書くと、削除済みのバックオフが
-// 復活して新しいトークンを最大24時間抑制してしまう。
+// バックオフは「どのトークンで失敗したか」に紐づけて保存する。
+// content 側の saveExtensionAuthToken() は runExclusive の外で storage を書き換えるため、
+// 「保存済みトークンを確認してから書く」形にしても確認と書き込みの間に再連携が割り込む
+// 余地が残る(TOCTOU)。書き込み側の原子性に頼らず、読み出し側で現在のトークンと照合し、
+// 一致しない記録は無効として扱う。これなら古い試行が後から書き戻しても影響しない。
+async function tokenFingerprint(token) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest).slice(0, 8))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 async function recordRefreshFailure(attemptedToken, status) {
-  const current = await storageGet([
-    STORAGE_KEYS.extensionAuthToken,
-    STORAGE_KEYS.extensionTokenRefreshBackoff,
-  ]);
-
-  if (current[STORAGE_KEYS.extensionAuthToken] !== attemptedToken) {
-    console.log('[extension-sync] token replaced during refresh; skipping backoff record', {
-      status: status ?? null,
-    });
-    return;
-  }
-
+  const current = await storageGet([STORAGE_KEYS.extensionTokenRefreshBackoff]);
   const previousBackoff = current[STORAGE_KEYS.extensionTokenRefreshBackoff] || null;
-  const failureCount = Number(previousBackoff?.failureCount) > 0
+  const fingerprint = await tokenFingerprint(attemptedToken);
+
+  // 直前の記録が別トークンのものなら連番を引き継がず 1 から数え直す。
+  const failureCount = previousBackoff?.tokenFingerprint === fingerprint
+    && Number(previousBackoff.failureCount) > 0
     ? Number(previousBackoff.failureCount) + 1
     : 1;
   const delayMs = Math.min(computeBackoffMs(failureCount, status), BACKOFF_MAX_MS);
 
   await storageSet({
     [STORAGE_KEYS.extensionTokenRefreshBackoff]: {
+      tokenFingerprint: fingerprint,
       failureCount,
       nextAttemptAt: new Date(Date.now() + delayMs).toISOString(),
       lastStatus: status ?? null,
@@ -90,13 +91,20 @@ async function performCheckAndRefreshToken() {
   const backoff = stored[STORAGE_KEYS.extensionTokenRefreshBackoff] || null;
   const nextAttemptAtMs = Date.parse(backoff?.nextAttemptAt || '');
   if (Number.isFinite(nextAttemptAtMs) && nextAttemptAtMs > Date.now()) {
-    return {
-      ok: true,
-      skipped: true,
-      reason: 'backoff',
-      nextAttemptAt: backoff.nextAttemptAt,
-      failureCount: backoff.failureCount ?? null,
-    };
+    // 現在のトークンに紐づく記録のときだけ抑制する。再連携で差し替わっていれば旧トークンの
+    // 記録なので、古い試行が競合で書き戻したものも含めて破棄し、通常どおり続行する。
+    if (backoff.tokenFingerprint === (await tokenFingerprint(token))) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: 'backoff',
+        nextAttemptAt: backoff.nextAttemptAt,
+        failureCount: backoff.failureCount ?? null,
+      };
+    }
+
+    console.log('[extension-sync] discarding backoff recorded for a superseded token');
+    await clearRefreshBackoff();
   }
 
   const expiresAtMs = Date.parse(stored[STORAGE_KEYS.extensionTokenExpiresAt] || '');
