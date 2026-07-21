@@ -2,6 +2,7 @@ import {
   STORAGE_KEYS,
   storageGet,
   storageSet,
+  storageRemove,
   normalizePendingClips,
   clearExtensionAuthState,
 } from './../shared/storage.js';
@@ -120,6 +121,9 @@ export async function saveExtensionAuthToken(extensionInstanceId, extensionAuthT
       : null,
     [STORAGE_KEYS.extensionLinked]: true,
   });
+  // 新しいトークンを受けた時点で旧トークン時代の失敗回数は無効。抑制を持ち越すと
+  // 再連携直後のリフレッシュが不要に待たされる。
+  await storageRemove([STORAGE_KEYS.extensionTokenRefreshBackoff]);
   return true;
 }
 

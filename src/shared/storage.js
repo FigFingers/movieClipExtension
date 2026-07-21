@@ -5,6 +5,7 @@ export const STORAGE_KEYS = {
   extensionInstanceId: 'extensionInstanceId',
   extensionAuthToken: 'extensionAuthToken',
   extensionTokenExpiresAt: 'extensionTokenExpiresAt',
+  extensionTokenRefreshBackoff: 'extensionTokenRefreshBackoff',
   extensionLinked: 'extensionLinked',
   lastSyncAt: 'lastSyncAt',
   pendingClips: 'pendingClips',
@@ -55,6 +56,8 @@ export async function clearExtensionAuthState() {
   await storageRemove([
     STORAGE_KEYS.extensionAuthToken,
     STORAGE_KEYS.extensionTokenExpiresAt,
+    // トークンを捨てる以上、旧トークンで積み上がったリフレッシュ抑制も持ち越さない。
+    STORAGE_KEYS.extensionTokenRefreshBackoff,
   ]);
   await storageSet({ [STORAGE_KEYS.extensionLinked]: false });
 }
