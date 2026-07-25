@@ -97,6 +97,8 @@ export function openMemoSidebar({
     height:100%;background:rgba(0,0,0,.85);padding:10px;
     box-sizing:border-box;z-index:9999;display:flex;flex-direction:column;gap:8px;`;
 
+  let removeKeyGuard;
+
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
   const title = document.createElement('strong');
@@ -106,6 +108,7 @@ export function openMemoSidebar({
   closeBtn.textContent = '×';
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
   const closeSidebar = () => {
+    removeKeyGuard?.();
     player.style.width = originalWidth || '100%';
     sb.remove();
     onClose?.();
@@ -148,11 +151,11 @@ export function openMemoSidebar({
   nameLabel.appendChild(nameInput);
   sb.appendChild(nameLabel);
 
-  const saveBtn = document.createElement('button');
-  saveBtn.textContent = '保存';
-  saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
-
-  saveBtn.onclick = () => {
+  // 二重送信防止（Enter リピート・保存連打・Enter/click 競合）。
+  let submitting = false;
+  const submit = () => {
+    if (submitting) return;
+    submitting = true;
     const enriched = {
       ...data,
       clipName: nameInput.value.trim(),
@@ -165,9 +168,55 @@ export function openMemoSidebar({
         closeSidebar();
       });
   };
+
+  // パネル内キーはサイトへ渡さず入力欄で処理。Enter で保存（IME 変換確定・リピート除外）。
+  const onPanelKey = (e) => {
+    if (!sb.contains(e.target)) return;
+    if (e.type === 'keydown' && e.key === 'Enter' && !e.isComposing && !e.repeat) {
+      e.preventDefault();
+      submit();
+    }
+    e.stopPropagation();
+  };
+  const keyTypes = ['keydown', 'keyup', 'keypress'];
+  for (const type of keyTypes) {
+    window.addEventListener(type, onPanelKey, true);
+  }
+
+  // サイトがプレイヤーへフォーカスを引き戻すため、外れたら入力欄へ戻す（凍結防止の上限つき）。
+  let refocusBudget = 30;
+  let refocusWindowStart = 0;
+  const keepFocusInPanel = () => {
+    if (sb.contains(document.activeElement)) return;
+    const now = Date.now();
+    if (now - refocusWindowStart > 1000) {
+      refocusWindowStart = now;
+      refocusBudget = 30;
+    }
+    if (refocusBudget <= 0) return;
+    refocusBudget -= 1;
+    nameInput.focus();
+  };
+  document.addEventListener('focusin', keepFocusInPanel, true);
+
+  removeKeyGuard = () => {
+    for (const type of keyTypes) {
+      window.removeEventListener(type, onPanelKey, true);
+    }
+    document.removeEventListener('focusin', keepFocusInPanel, true);
+  };
+
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = '保存';
+  saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
+  saveBtn.onclick = submit;
   sb.appendChild(saveBtn);
 
   document.body.appendChild(sb);
+
+  nameInput.focus();
+  nameInput.select();
+
   return sb;
 }
 
