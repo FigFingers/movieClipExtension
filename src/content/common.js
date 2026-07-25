@@ -141,7 +141,9 @@ export function openMemoSidebar({
   nameLabel.style.cssText = 'font-size:12px;color:#fff;';
   nameLabel.textContent = '名前:';
   const nameInput = document.createElement('input');
-  nameInput.style.cssText = 'width:100%;margin-top:4px;';
+  // 親 label の color:#fff を継承して白背景に埋もれるため色を明示する。
+  nameInput.style.cssText =
+    'width:100%;margin-top:4px;padding:4px 6px;box-sizing:border-box;color:#000;background:#fff;border:1px solid #ccc;border-radius:3px;';
   nameInput.value = data?.clipName || '';
   nameLabel.appendChild(nameInput);
   sb.appendChild(nameLabel);
