@@ -3,9 +3,11 @@ import {
   detectService,
   isAutoNavigation,
   markAutoNavigation,
+  markExtUi,
   openMemoSidebar,
   requestSeek,
-  sendData
+  sendData,
+  startTabVisibilityToggle
 } from './common.js';
 
 (() => {
@@ -268,6 +270,7 @@ import {
       if (!overlay) {
         overlay = document.createElement('div');
         overlay.id = OVERLAY_ID;
+        markExtUi(overlay);
 
         const bar = document.createElement('div');
         bar.id = BAR_ID;
@@ -487,6 +490,7 @@ import {
       hookHistory();
       startObserver();
       scheduleInjection();
+      startTabVisibilityToggle();
     }
 
     return {
