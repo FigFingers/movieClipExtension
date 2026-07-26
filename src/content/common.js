@@ -6,6 +6,10 @@ import {
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
 export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
 
+// 表示中サイドバーの key/focus ガード解除関数。再オープン時に前インスタンスの
+// リスナーを確実に外すため、DOM ではなくモジュールスコープで保持する。
+let activeMemoTeardown = null;
+
 export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
   if (host.includes('primevideo.com')) return 'Prime Video';
@@ -84,6 +88,10 @@ export function openMemoSidebar({
     document.querySelector('video')?.parentElement;
   if (!player) return null;
 
+  // 直前のサイドバーが closeSidebar を経ずに残っている場合、先にガードを解除する
+  // （DOM を直接 remove するとリスナーが取り外し済み要素を参照し続けるため）。
+  activeMemoTeardown?.();
+  activeMemoTeardown = null;
   document.getElementById(MEMO_SIDEBAR_ID)?.remove();
 
   const originalWidth = player.style.width;
@@ -109,6 +117,7 @@ export function openMemoSidebar({
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
   const closeSidebar = () => {
     removeKeyGuard?.();
+    activeMemoTeardown = null;
     player.style.width = originalWidth || '100%';
     sb.remove();
     onClose?.();
@@ -205,6 +214,7 @@ export function openMemoSidebar({
     }
     document.removeEventListener('focusin', keepFocusInPanel, true);
   };
+  activeMemoTeardown = removeKeyGuard;
 
   const saveBtn = document.createElement('button');
   saveBtn.textContent = '保存';
