@@ -1,6 +1,7 @@
 import {
   clearAutoNavigation,
   detectService,
+  EXT_UI_CLASS,
   isAutoNavigation,
   markAutoNavigation,
   markExtUi,
@@ -486,11 +487,56 @@ import {
       window.addEventListener('popstate', dispatch);
     }
 
+    // Disney+ はマウス静止でネイティブのコントロール行が自動的に消える。拡張ボタンも
+    // それに追随させ、(1) 一定時間ポインタ操作が無いアイドル時 (2) ウィンドウが blur した
+    // ときに隠す。停止中はネイティブ同様に出したままにする。表示制御は共通の EXT_UI_CLASS
+    // に対し <html>.dext-player-idle で行うため、再注入されたボタンにも効く。
+    const PLAYER_IDLE_CLASS = 'dext-player-idle';
+    const PLAYER_IDLE_STYLE_ID = 'dext-player-idle-style';
+    const PLAYER_IDLE_MS = 3000;
+
+    function ensurePlayerIdleStyle() {
+      if (document.getElementById(PLAYER_IDLE_STYLE_ID)) return;
+      const style = document.createElement('style');
+      style.id = PLAYER_IDLE_STYLE_ID;
+      style.textContent = `.${PLAYER_IDLE_CLASS} .${EXT_UI_CLASS} { opacity: 0; pointer-events: none; }`;
+      (document.head || document.documentElement).appendChild(style);
+    }
+
+    function startPlayerActivityToggle() {
+      ensurePlayerIdleStyle();
+      const root = document.documentElement;
+      let idleTimer = null;
+      let paused = false;
+
+      const setIdle = (v) => root.classList.toggle(PLAYER_IDLE_CLASS, v);
+      const goIdle = () => setIdle(true);
+      const markActive = () => {
+        setIdle(false);
+        clearTimeout(idleTimer);
+        // 停止中はネイティブ同様に出したまま。再生中だけ一定時間で隠す。
+        idleTimer = paused ? null : setTimeout(goIdle, PLAYER_IDLE_MS);
+      };
+
+      for (const type of ['pointermove', 'pointerdown', 'keydown']) {
+        document.addEventListener(type, markActive, { passive: true });
+      }
+      // ウィンドウが非アクティブになったら即座に隠す / 戻ったら復帰。
+      window.addEventListener('blur', goIdle);
+      window.addEventListener('focus', markActive);
+      // 再生/停止（media イベントは bubble しないため capture で拾う）。
+      document.addEventListener('play', () => { paused = false; markActive(); }, true);
+      document.addEventListener('pause', () => { paused = true; markActive(); }, true);
+
+      markActive();
+    }
+
     function bootstrap() {
       hookHistory();
       startObserver();
       scheduleInjection();
       startTabVisibilityToggle();
+      startPlayerActivityToggle();
     }
 
     return {
