@@ -90,11 +90,13 @@ export function openMemoSidebar({
 
   // 直前のサイドバーが closeSidebar を経ずに残っている場合、先にガードを解除する
   // （DOM を直接 remove するとリスナーが取り外し済み要素を参照し続けるため）。
+  const reopening = !!document.getElementById(MEMO_SIDEBAR_ID);
   activeMemoTeardown?.();
   activeMemoTeardown = null;
   document.getElementById(MEMO_SIDEBAR_ID)?.remove();
 
-  const originalWidth = player.style.width;
+  // 再オープン時は縮んだ幅を「元の幅」として記憶しない（閉じても戻らなくなるため）。
+  const originalWidth = reopening ? '' : player.style.width;
   player.style.transition = 'width .3s';
   player.style.width = `calc(100% - ${sidebarPct}%)`;
 
