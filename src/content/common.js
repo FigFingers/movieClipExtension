@@ -117,7 +117,9 @@ export function openMemoSidebar({
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
   const closeSidebar = () => {
     removeKeyGuard?.();
-    activeMemoTeardown = null;
+    // 保存の非同期完了で遅れて閉じる場合、既に別のサイドバーが開いていることがある。
+    // 自分の teardown のときだけ落とす。
+    if (activeMemoTeardown === removeKeyGuard) activeMemoTeardown = null;
     player.style.width = originalWidth || '100%';
     sb.remove();
     onClose?.();
