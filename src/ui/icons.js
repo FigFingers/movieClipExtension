@@ -45,6 +45,9 @@ const MARKUP = {
     </svg>`,
 };
 
+/** 色変化をアニメーションするアイコン（旧 moreDetailSVG / LoopButtonSVG の挙動）。 */
+const COLOR_TRANSITION = new Set(["loop", "list"]);
+
 /** アイコン名の一覧（凍結）。 */
 export const ICON_NAMES = Object.freeze(Object.keys(MARKUP));
 
@@ -83,5 +86,8 @@ export function createIcon(name) {
   // 従来の実寸（120%）を保つため生成時に明示する。
   icon.setAttribute("width", "120%");
   icon.setAttribute("height", "120%");
+  if (COLOR_TRANSITION.has(name)) {
+    icon.style.transition = "color 0.2s ease";
+  }
   return icon;
 }
