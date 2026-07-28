@@ -507,15 +507,15 @@ import {
       ensurePlayerIdleStyle();
       const root = document.documentElement;
       let idleTimer = null;
-      let paused = false;
 
       const setIdle = (v) => root.classList.toggle(PLAYER_IDLE_CLASS, v);
       const goIdle = () => setIdle(true);
+      // 停止中・video 未生成のときはネイティブ同様に出したまま。再生中だけ一定時間で隠す。
+      const isPlaying = () => getVideoElement()?.paused === false;
       const markActive = () => {
         setIdle(false);
         clearTimeout(idleTimer);
-        // 停止中はネイティブ同様に出したまま。再生中だけ一定時間で隠す。
-        idleTimer = paused ? null : setTimeout(goIdle, PLAYER_IDLE_MS);
+        idleTimer = isPlaying() ? setTimeout(goIdle, PLAYER_IDLE_MS) : null;
       };
 
       for (const type of ['pointermove', 'pointerdown', 'keydown']) {
@@ -525,8 +525,8 @@ import {
       window.addEventListener('blur', goIdle);
       window.addEventListener('focus', markActive);
       // 再生/停止（media イベントは bubble しないため capture で拾う）。
-      document.addEventListener('play', () => { paused = false; markActive(); }, true);
-      document.addEventListener('pause', () => { paused = true; markActive(); }, true);
+      document.addEventListener('play', markActive, true);
+      document.addEventListener('pause', markActive, true);
 
       markActive();
     }
