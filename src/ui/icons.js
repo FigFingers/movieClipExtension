@@ -43,10 +43,19 @@ const MARKUP = {
       <path d="M12 2a10 10 0 1 1 0 20a10 10 0 1 1 0-20z" />
       <path d="M10 10l6 -2l-2 6l-6 2z" />
     </svg>`,
+  // クリップ別コメント
+  comment: `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" stroke-width="1.5"
+         stroke-linecap="round" stroke-linejoin="round"
+         aria-hidden="true" focusable="false">
+      <path d="M5 4.5h14a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-5.8 3v-3.2A2.5 2.5 0 0 1 2.5 15V7A2.5 2.5 0 0 1 5 4.5z" />
+      <path d="M7.5 9h9M7.5 13h6" />
+    </svg>`,
 };
 
 /** 色変化をアニメーションするアイコン（旧 moreDetailSVG / LoopButtonSVG の挙動）。 */
-const COLOR_TRANSITION = new Set(["loop", "list"]);
+const COLOR_TRANSITION = new Set(["loop", "list", "comment"]);
 
 /** アイコン名の一覧（凍結）。 */
 export const ICON_NAMES = Object.freeze(Object.keys(MARKUP));
@@ -75,7 +84,7 @@ function fromMarkup(markup) {
 
 /**
  * アイコン名から SVG 要素を生成する。未知の名前は Error を投げる。
- * @param {'record'|'loop'|'list'} name
+ * @param {'record'|'loop'|'list'|'comment'} name
  * @returns {SVGSVGElement}
  */
 export function createIcon(name) {

@@ -7,6 +7,11 @@ import {
   requestSeek,
   sendData
 } from './common.js';
+import {
+  COMMENT_PANEL_ID,
+  isCommentPanelOpen,
+  toggleCommentPanel
+} from './commentPanel.js';
 
 (() => {
   const AUTO_NAV_STORAGE_KEY = 'autoNav';
@@ -143,7 +148,13 @@ import {
     const BUTTONS = [
       { id: 'dext-left-button', area: 'left', label: 'Left Button', action: myCustomActionLeft },
       { id: 'dext-right-button-1', area: 'right', label: 'Right Button 1', action: myCustomActionRight1 },
-      { id: 'dext-right-button-2', area: 'right', label: 'Right Button 2', action: myCustomActionRight2 }
+      {
+        id: 'dext-right-button-2',
+        area: 'right',
+        label: 'コメント',
+        action: myCustomActionRight2,
+        controls: COMMENT_PANEL_ID
+      }
     ];
 
     let observer = null;
@@ -306,6 +317,12 @@ import {
         container.id = config.id;
         container.className = 'dext-button-container button-container';
         container.setAttribute('role', 'button');
+        container.setAttribute('aria-label', config.label);
+        if (config.controls) {
+          container.setAttribute('aria-haspopup', 'dialog');
+          container.setAttribute('aria-controls', config.controls);
+          container.setAttribute('aria-expanded', 'false');
+        }
         container.tabIndex = 0; // キーボード対応
 
         // 内側のダミーbutton（Disney+は内側buttonに .control を置いている）
@@ -323,10 +340,15 @@ import {
 
         // クリック＆キーボードで発火（captureも保険で使用）
         const onActivate = (e) => {
+          let nextActiveState;
           if (typeof config.action === 'function') {
-            config.action();   // ボタンごとに関数を実行
+            nextActiveState = config.action(container);   // ボタンごとに関数を実行
           }
-          container.classList.toggle('active');
+          if (typeof nextActiveState === 'boolean') {
+            container.classList.toggle('active', nextActiveState);
+          } else {
+            container.classList.toggle('active');
+          }
           e.stopPropagation();                  // 他のハンドラに奪われないように
         };
 
@@ -344,6 +366,17 @@ import {
         });
 
         host.appendChild(container);
+      }
+
+      const label = container.querySelector('.dext-button-label');
+      if (label) {
+        label.textContent = config.label;
+      }
+      container.setAttribute('aria-label', config.label);
+      if (config.controls) {
+        const panelOpen = isCommentPanelOpen();
+        container.classList.toggle('active', panelOpen);
+        container.setAttribute('aria-expanded', String(panelOpen));
       }
 
       return container;
@@ -402,7 +435,16 @@ import {
       Mode.toggleLoop();
     }
 
-    function myCustomActionRight2() {
+    function myCustomActionRight2(triggerEl) {
+      return toggleCommentPanel({
+        mountEl: getPlayerRoot() || document.body,
+        triggerEl,
+        onOpenChange: (open) => {
+          if (!triggerEl?.isConnected) return;
+          triggerEl.classList.toggle('active', open);
+          triggerEl.setAttribute('aria-expanded', String(open));
+        }
+      });
     }
 
     function injectButtons() {

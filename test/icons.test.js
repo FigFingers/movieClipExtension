@@ -8,8 +8,8 @@ import { test } from "node:test";
 
 import { ICON_NAMES, createIcon, isIconName } from "../src/ui/icons.js";
 
-test("ICON_NAMES は統合した 3 アイコンを含む", () => {
-  assert.deepEqual([...ICON_NAMES].sort(), ["list", "loop", "record"]);
+test("ICON_NAMES は統合した 4 アイコンを含む", () => {
+  assert.deepEqual([...ICON_NAMES].sort(), ["comment", "list", "loop", "record"]);
 });
 
 test("ICON_NAMES は凍結されている", () => {
@@ -17,14 +17,12 @@ test("ICON_NAMES は凍結されている", () => {
 });
 
 test("isIconName は既知のアイコン名を true にする", () => {
-  for (const name of ["record", "loop", "list"]) {
+  for (const name of ["record", "loop", "list", "comment"]) {
     assert.equal(isIconName(name), true);
   }
 });
 
 test("isIconName は未知のアイコン名を false にする", () => {
-  // comment は Phase 2 で追加予定。現時点では未知扱い。
-  assert.equal(isIconName("comment"), false);
   assert.equal(isIconName("bogus"), false);
   assert.equal(isIconName(""), false);
   assert.equal(isIconName("toString"), false); // プロトタイプ経由で誤検知しない

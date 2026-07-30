@@ -16,6 +16,11 @@ import {
   sendData,
   requestSeek
 } from './common.js';
+import {
+  COMMENT_PANEL_ID,
+  isCommentPanelOpen,
+  toggleCommentPanel
+} from './commentPanel.js';
 import { setCookie } from '../util/cookies.js';
 import { buildServiceUrl } from '../util/services.js';
 
@@ -68,6 +73,7 @@ function initializeNetflixPlayback() {
 
   const BUTTON_ID = "nf-loop-toggle-btn";
   const NEXT_BUTTON_ID = "nf-next-clip-btn";
+  const COMMENT_BUTTON_ID = "nf-comment-toggle-btn";
   const SIDEBAR_ID = MEMO_SIDEBAR_ID;
   const SIDEBAR_PCT = 30;
 
@@ -261,6 +267,36 @@ function initializeNetflixPlayback() {
     return { btn, svg: svgIcon };
   }
 
+  function createCommentButton() {
+    const svgIcon = createIcon("comment");
+    const btn = document.createElement("button");
+    btn.id = COMMENT_BUTTON_ID;
+    btn.setAttribute("aria-label", "コメント表示");
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.setAttribute("aria-controls", COMMENT_PANEL_ID);
+    btn.appendChild(svgIcon);
+    btn.style.cursor = "pointer";
+
+    const updateOpenState = (open) => {
+      btn.setAttribute("aria-expanded", String(open));
+      svgIcon.style.color = open ? COLOR_LOOPING : COLOR_DEFAULT;
+    };
+    updateOpenState(isCommentPanelOpen());
+
+    btn.addEventListener("click", () => {
+      const mountEl =
+        document.querySelector('div[data-uia="player"]') ||
+        document.querySelector(".watch-video--player-view") ||
+        document.body;
+      toggleCommentPanel({
+        mountEl,
+        triggerEl: btn,
+        onOpenChange: updateOpenState
+      });
+    });
+    return { btn, svg: svgIcon };
+  }
+
   const uiObserver = new MutationObserver(() => {
     const controls    = document.querySelector(SELECTOR_STANDARD);
     const episodeBtn  = document.querySelector(SELECTOR_EPISODE);
@@ -268,18 +304,28 @@ function initializeNetflixPlayback() {
 
     const loopBtnExists = document.getElementById(BUTTON_ID);
     const nextBtnExists = document.getElementById(NEXT_BUTTON_ID);
+    const commentBtnExists = document.getElementById(COMMENT_BUTTON_ID);
 
-    if (controls && !loopBtnExists && !nextBtnExists && (episodeBtn || subtitleBtn)) {
+    if (
+      controls &&
+      !loopBtnExists &&
+      !nextBtnExists &&
+      !commentBtnExists &&
+      (episodeBtn || subtitleBtn)
+    ) {
       const anchorBtn = episodeBtn || subtitleBtn;
 
       const { btn: loopButton, svg: loopSvg } = createLoopButton();
       const { btn: playNextButton, svg: playSvg } = createPlayNextClipButton();
+      const { btn: commentButton, svg: commentSvg } = createCommentButton();
 
       loopButton.className     = anchorBtn.className;
       playNextButton.className = anchorBtn.className;
+      commentButton.className  = anchorBtn.className;
 
       loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
       playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
+      commentSvg.style.color = isCommentPanelOpen() ? COLOR_LOOPING : COLOR_DEFAULT;
 
       const wrapper = document.createElement("div");
       wrapper.className = anchorBtn.parentNode.className;
@@ -294,6 +340,7 @@ function initializeNetflixPlayback() {
       wrapper.appendChild(loopButton);
       wrapper.appendChild(separator);
       wrapper.appendChild(playNextButton);
+      wrapper.appendChild(commentButton);
 
       anchorBtn.parentNode.after(wrapper);
 
@@ -305,6 +352,7 @@ function initializeNetflixPlayback() {
     if (!document.querySelector(SELECTOR_FWD10)) {
       document.getElementById(BUTTON_ID)?.remove();
       document.getElementById(NEXT_BUTTON_ID)?.remove();
+      document.getElementById(COMMENT_BUTTON_ID)?.remove();
     }
   });
   uiObserver.observe(document.body, { childList: true, subtree: true });
