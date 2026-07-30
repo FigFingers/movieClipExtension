@@ -6,9 +6,9 @@ import {
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
 export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
 
-// 表示中サイドバーの key/focus ガード解除関数。再オープン時に前インスタンスの
-// リスナーを確実に外すため、DOM ではなくモジュールスコープで保持する。
-let activeMemoTeardown = null;
+// 表示中サイドバーの状態。再オープン時に元のプレイヤー幅を引き継ぎつつ、
+// 前インスタンスのリスナーを確実に外すためモジュールスコープで保持する。
+let activeMemoSession = null;
 
 export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
@@ -88,15 +88,23 @@ export function openMemoSidebar({
     document.querySelector('video')?.parentElement;
   if (!player) return null;
 
-  // 直前のサイドバーが closeSidebar を経ずに残っている場合、先にガードを解除する
-  // （DOM を直接 remove するとリスナーが取り外し済み要素を参照し続けるため）。
-  const reopening = !!document.getElementById(MEMO_SIDEBAR_ID);
-  activeMemoTeardown?.();
-  activeMemoTeardown = null;
+  // 直前のサイドバーが残っている場合は旧セッションを無効化する。同じプレイヤーなら
+  // 最初に開く前の幅を引き継ぎ、別プレイヤーなら旧プレイヤーの幅をここで復元する。
+  const previousSession = activeMemoSession;
+  let originalWidth = player.style.width;
+  if (previousSession) {
+    previousSession.supersede();
+    previousSession.teardown();
+    previousSession.sidebar.remove();
+    if (previousSession.player === player) {
+      originalWidth = previousSession.originalWidth;
+    } else {
+      previousSession.player.style.width = previousSession.originalWidth || '100%';
+    }
+    activeMemoSession = null;
+  }
   document.getElementById(MEMO_SIDEBAR_ID)?.remove();
 
-  // 再オープン時は縮んだ幅を「元の幅」として記憶しない（閉じても戻らなくなるため）。
-  const originalWidth = reopening ? '' : player.style.width;
   player.style.transition = 'width .3s';
   player.style.width = `calc(100% - ${sidebarPct}%)`;
 
@@ -108,6 +116,9 @@ export function openMemoSidebar({
     box-sizing:border-box;z-index:9999;display:flex;flex-direction:column;gap:8px;`;
 
   let removeKeyGuard;
+  let session;
+  let closed = false;
+  let superseded = false;
 
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
@@ -118,11 +129,14 @@ export function openMemoSidebar({
   closeBtn.textContent = '×';
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
   const closeSidebar = () => {
+    if (closed) return;
+    closed = true;
     removeKeyGuard?.();
-    // 保存の非同期完了で遅れて閉じる場合、既に別のサイドバーが開いていることがある。
-    // 自分の teardown のときだけ落とす。
-    if (activeMemoTeardown === removeKeyGuard) activeMemoTeardown = null;
-    player.style.width = originalWidth || '100%';
+    // 保存完了が遅れても、現在表示中のセッションだけがプレイヤー幅を変更できる。
+    if (activeMemoSession === session) {
+      activeMemoSession = null;
+      player.style.width = originalWidth || '100%';
+    }
     sb.remove();
     onClose?.();
   };
@@ -177,7 +191,13 @@ export function openMemoSidebar({
     Promise.resolve(result)
       .catch((error) => console.error('保存エラー:', error))
       .finally(() => {
-        videoPlayer?.play?.();
+        // 再オープンで置き換えられた旧セッションは、新しい入力中の再生状態に触れない。
+        if (
+          !superseded &&
+          (!activeMemoSession || activeMemoSession === session)
+        ) {
+          videoPlayer?.play?.();
+        }
         closeSidebar();
       });
   };
@@ -185,7 +205,13 @@ export function openMemoSidebar({
   // パネル内キーはサイトへ渡さず入力欄で処理。Enter で保存（IME 変換確定・リピート除外）。
   const onPanelKey = (e) => {
     if (!sb.contains(e.target)) return;
-    if (e.type === 'keydown' && e.key === 'Enter' && !e.isComposing && !e.repeat) {
+    if (
+      e.target === nameInput &&
+      e.type === 'keydown' &&
+      e.key === 'Enter' &&
+      !e.isComposing &&
+      !e.repeat
+    ) {
       e.preventDefault();
       submit();
     }
@@ -218,7 +244,6 @@ export function openMemoSidebar({
     }
     document.removeEventListener('focusin', keepFocusInPanel, true);
   };
-  activeMemoTeardown = removeKeyGuard;
 
   const saveBtn = document.createElement('button');
   saveBtn.textContent = '保存';
@@ -227,6 +252,17 @@ export function openMemoSidebar({
   sb.appendChild(saveBtn);
 
   document.body.appendChild(sb);
+
+  session = {
+    sidebar: sb,
+    player,
+    originalWidth,
+    teardown: removeKeyGuard,
+    supersede: () => {
+      superseded = true;
+    },
+  };
+  activeMemoSession = session;
 
   nameInput.focus();
   nameInput.select();
