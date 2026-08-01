@@ -1,7 +1,9 @@
 import "../css/content_button.css";
-import "../image/moreDetailSVG.js";
-import "../image/recordSVG.js";
-import "../image/LoopButtonSVG.js";
+import {
+  COLOR_ACTIVE as ICON_COLOR_ACTIVE,
+  COLOR_DEFAULT as ICON_COLOR_DEFAULT,
+  createIcon
+} from "../ui/icons.js";
 import { getApiEndpoint } from './../api.js';
 import {
   clearAutoNavigation,
@@ -76,8 +78,8 @@ function initializeNetflixPlayback() {
   const SELECTOR_FWD10    = '[data-uia="control-forward10"]';
   const SELECTOR_SUBTITLE = '[data-uia="control-audio-subtitle"]';
 
-  const COLOR_DEFAULT = window.COLOR_DETAIL_DEFAULT || "#FFFFFF";
-  const COLOR_LOOPING = window.COLOR_DETAIL_ACTIVE  || "#FF0000";
+  const COLOR_DEFAULT = ICON_COLOR_DEFAULT;
+  const COLOR_LOOPING = ICON_COLOR_ACTIVE;
   let isLooping = false;
   let togglekey = false;
   let uiWarmerInterval = null;
@@ -108,10 +110,9 @@ function initializeNetflixPlayback() {
       recordButton.id = RECORD_BUTTON_ID;
       recordButton.setAttribute("aria-label", "録画ボタン");
 
-      const svgElement = window.createSVG?.();
-      if (!svgElement) {
-        return;
-      }
+      const svgElement = createIcon("record");
+      // 旧 recordSVG が持っていた初期色（白）を移設。currentColor の継承に頼らず明示する。
+      svgElement.setAttribute("color", ICON_COLOR_DEFAULT);
 
       let isRecording = false;
       let startTime = null;
@@ -134,7 +135,7 @@ function initializeNetflixPlayback() {
 
             const clipSeconds = Math.abs(endTime - startTime);
             if (clipSeconds < 1) {
-              svgElement.setAttribute("color", window.COLOR_RECORDING);
+              svgElement.setAttribute("color", ICON_COLOR_ACTIVE);
               throw new Error("録画範囲が短すぎます");
             }
 
@@ -170,7 +171,7 @@ function initializeNetflixPlayback() {
             });
             resetRecordState();
           } else {
-            svgElement.setAttribute("color", window.COLOR_RECORDING);
+            svgElement.setAttribute("color", ICON_COLOR_ACTIVE);
             isRecording = true;
             startTime = videoPlayer.currentTime;
           }
@@ -218,7 +219,7 @@ function initializeNetflixPlayback() {
         isRecording = false;
         startTime = null;
         endTime = null;
-        svgElement.setAttribute("color", window.COLOR_DEFAULT);
+        svgElement.setAttribute("color", ICON_COLOR_DEFAULT);
       }
     });
 
@@ -236,7 +237,7 @@ function initializeNetflixPlayback() {
   // UI生成
   // ---------------------------------------------------------------------------
   function createLoopButton() {
-    const svgIcon = window.createMoreDetailSVG(COLOR_DEFAULT);
+    const svgIcon = createIcon("list");
     const btn = document.createElement("button");
     btn.id = BUTTON_ID;
     btn.setAttribute("aria-label", "メモサイドバー開閉");
@@ -251,7 +252,7 @@ function initializeNetflixPlayback() {
   }
 
   function createPlayNextClipButton() {
-    const svgIcon = window.LoopButtonSVG(COLOR_DEFAULT);
+    const svgIcon = createIcon("loop");
     const btn = document.createElement("button");
     btn.id = NEXT_BUTTON_ID;
     btn.setAttribute("aria-label", "次のクリップを再生");
