@@ -185,3 +185,36 @@ export function clearAutoNavigation() {
   sessionStorage.removeItem(AUTO_NAVIGATION_KEY);
   localStorage.removeItem(AUTO_NAVIGATION_KEY);
 }
+
+// === タブ可視性に応じた拡張 UI の表示制御 ===
+// 動画タブが裏に回った（document.hidden）ら拡張ボタンを隠し、戻ったら opacity の
+// トランジションでフェードインさせる。対象は markExtUi で EXT_UI_CLASS を付けた要素。
+// 状態は <html> の class で持たせて CSS 一括制御するため、タブが隠れている間に
+// 再注入されたボタンにも自動で効く。
+export const EXT_UI_CLASS = 'dext-ext-ui';
+const TAB_HIDDEN_CLASS = 'dext-tab-hidden';
+const VISIBILITY_STYLE_ID = 'dext-visibility-style';
+
+export function markExtUi(element) {
+  element?.classList.add(EXT_UI_CLASS);
+  return element;
+}
+
+function ensureVisibilityStyle() {
+  if (document.getElementById(VISIBILITY_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = VISIBILITY_STYLE_ID;
+  style.textContent = `
+    .${EXT_UI_CLASS} { transition: opacity .3s ease; }
+    .${TAB_HIDDEN_CLASS} .${EXT_UI_CLASS} { opacity: 0; pointer-events: none; }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+export function startTabVisibilityToggle() {
+  ensureVisibilityStyle();
+  const apply = () =>
+    document.documentElement.classList.toggle(TAB_HIDDEN_CLASS, document.hidden);
+  apply();
+  document.addEventListener('visibilitychange', apply);
+}

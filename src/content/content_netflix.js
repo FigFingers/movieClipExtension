@@ -11,9 +11,11 @@ import {
   handleClipTransition,
   isAutoNavigation,
   markAutoNavigation,
+  markExtUi,
   MEMO_SIDEBAR_ID,
   openMemoSidebar,
   sendData,
+  startTabVisibilityToggle,
   requestSeek
 } from './common.js';
 import { setCookie } from '../util/cookies.js';
@@ -84,6 +86,7 @@ function initializeNetflixPlayback() {
 
   clearAutoNavigation();
   bootstrapRecordControls();
+  startTabVisibilityToggle();
 
   function bootstrapRecordControls() {
     const RECORD_BUTTON_ID = "record-button";
@@ -189,6 +192,7 @@ function initializeNetflixPlayback() {
           }
 
           recordButton.className = controlVolumeElement.className;
+          markExtUi(recordButton);
           recordButton.appendChild(svgElement);
           wrapButton.className = controlVolumeElement.parentNode.className;
           controlVolumeElement.parentNode.after(wrapButton);
@@ -277,6 +281,8 @@ function initializeNetflixPlayback() {
 
       loopButton.className     = anchorBtn.className;
       playNextButton.className = anchorBtn.className;
+      markExtUi(loopButton);
+      markExtUi(playNextButton);
 
       loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
       playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
