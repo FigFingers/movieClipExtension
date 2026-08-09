@@ -86,6 +86,19 @@ const PANEL_STYLES = `
     opacity: 0.55;
   }
 
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .refresh {
+    padding: 6px 10px;
+    color: #fff;
+    background: rgba(255, 255, 255, 0.14);
+    font-size: 12px;
+  }
+
   .close {
     width: 32px;
     height: 32px;
@@ -335,6 +348,7 @@ function updateSubmitState(controller) {
   controller.submitButton.disabled =
     !controller.composeAvailable || controller.posting || !hasBody;
   controller.textarea.disabled = !controller.composeAvailable;
+  controller.refreshButton.disabled = controller.posting;
 }
 
 function setComposeAvailable(controller, available) {
@@ -714,6 +728,21 @@ async function postComment(controller) {
   }
 }
 
+/**
+ * 先頭ページを取り直して一覧を作り直す。サイト側でコメントが削除されると
+ * 一覧から消えるだけなので、追記マージのままでは削除済みが残り続ける。
+ */
+function reloadComments(controller) {
+  if (controller.closed || controller.posting) return;
+
+  if (controller.clipId === null) {
+    void refreshCurrentClip(controller);
+    return;
+  }
+
+  void loadComments(controller);
+}
+
 function scheduleStorageRefresh(controller) {
   if (controller.refreshScheduled || controller.closed) return;
   controller.refreshScheduled = true;
@@ -744,6 +773,22 @@ function removeStorageListener(controller) {
   controller.storageListener = null;
 }
 
+// サイトのタブでコメントを消して戻ってきたときに、削除済みを表示したままにしない。
+function addVisibilityListener(controller) {
+  controller.visibilityListener = () => {
+    if (document.visibilityState === 'visible') {
+      reloadComments(controller);
+    }
+  };
+  document.addEventListener('visibilitychange', controller.visibilityListener);
+}
+
+function removeVisibilityListener(controller) {
+  if (!controller.visibilityListener) return;
+  document.removeEventListener('visibilitychange', controller.visibilityListener);
+  controller.visibilityListener = null;
+}
+
 function notifyOpenState(controller, open) {
   try {
     controller.onOpenChange?.(open);
@@ -758,6 +803,7 @@ function closeController(controller, { restoreFocus = true } = {}) {
   controller.contextVersion += 1;
   controller.requestVersion += 1;
   removeStorageListener(controller);
+  removeVisibilityListener(controller);
   window.removeEventListener('beforeunload', controller.beforeUnload);
   controller.host.remove();
   if (activePanel === controller) {
@@ -813,11 +859,18 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   const title = createElement('h2', 'コメント');
   title.id = `${COMMENT_PANEL_ID}-title`;
   title.className = 'title';
+  const refreshButton = createElement('button', '更新');
+  refreshButton.type = 'button';
+  refreshButton.className = 'refresh';
+  refreshButton.setAttribute('aria-label', 'コメントを再読み込み');
   const closeButton = createElement('button', '×');
   closeButton.type = 'button';
   closeButton.className = 'close';
   closeButton.setAttribute('aria-label', 'コメントを閉じる');
-  header.append(title, closeButton);
+  const headerActions = createElement('div');
+  headerActions.className = 'header-actions';
+  headerActions.append(refreshButton, closeButton);
+  header.append(title, headerActions);
 
   const commentsList = createElement('div');
   commentsList.className = 'comments';
@@ -865,6 +918,7 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
     panel,
     commentsList,
     closeButton,
+    refreshButton,
     loadMoreButton,
     textarea,
     submitButton,
@@ -884,10 +938,12 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
     requestVersion: 0,
     refreshScheduled: false,
     storageListener: null,
+    visibilityListener: null,
     beforeUnload: null,
   };
 
   closeButton.addEventListener('click', () => closeController(controller));
+  refreshButton.addEventListener('click', () => reloadComments(controller));
   textarea.addEventListener('input', () => updateSubmitState(controller));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
@@ -921,6 +977,7 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   controller.beforeUnload = () => closeController(controller, { restoreFocus: false });
   window.addEventListener('beforeunload', controller.beforeUnload, { once: true });
   addStorageListener(controller);
+  addVisibilityListener(controller);
   return controller;
 }
 

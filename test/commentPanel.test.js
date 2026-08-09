@@ -92,6 +92,31 @@ test('playmode が無い旧状態では mode key をフォールバック利用�
   );
 });
 
+test('プレイリスト再生は残留した単体再生の clip を参照しない', () => {
+  assert.equal(
+    resolveCurrentClipIdFromState({
+      playmode: 'playlist',
+      clip: { clipId: 555 },
+      currentClipOrder: 1,
+      playQueue: [
+        { order: 0, id: 100 },
+        { order: 1, id: 101 },
+      ],
+    }),
+    101
+  );
+});
+
+test('clipId cookie が失効した単体再生は null にする', () => {
+  assert.equal(
+    resolveCurrentClipIdFromState({
+      playmode: 'clip',
+      clip: { title: 'タイトル', starttime: '10', endtime: '20' },
+    }),
+    null
+  );
+});
+
 test('再生モードが無い通常視聴では null にする', () => {
   assert.equal(
     resolveCurrentClipIdFromState({
