@@ -549,6 +549,10 @@ import {
       ensurePlayerIdleStyle();
       const root = document.documentElement;
       let idleTimer = null;
+      // 起動直後やタブ復帰直後は、ユーザーがまだページをクリックしていないと
+      // document.hasFocus() が false を返すことがある。可視タブはひとまずアクティブとし、
+      // 以降は focus / blur / visibilitychange で状態を追跡する。
+      let pageActive = !document.hidden;
 
       const setIdle = (v) => root.classList.toggle(PLAYER_IDLE_CLASS, v);
       const goIdle = () => {
@@ -564,19 +568,37 @@ import {
         idleTimer = isPlaying() ? setTimeout(goIdle, PLAYER_IDLE_MS) : null;
       };
       // blur / 非表示中は play・pause など操作以外のイベントで復帰させない。
-      const markActive = () => (document.hasFocus() ? activate() : goIdle());
+      const markActive = () => (pageActive ? activate() : goIdle());
+      const handleBlur = () => {
+        pageActive = false;
+        goIdle();
+      };
+      const handleFocus = () => {
+        pageActive = true;
+        activate();
+      };
+      const handleVisibilityChange = () => {
+        pageActive = !document.hidden;
+        if (pageActive) {
+          activate();
+        } else {
+          goIdle();
+        }
+      };
 
       for (const type of ['pointermove', 'pointerdown', 'keydown']) {
         document.addEventListener(type, markActive, { passive: true });
       }
       // ウィンドウが非アクティブになったら即座に隠す / 戻ったら復帰。
-      window.addEventListener('blur', goIdle);
-      window.addEventListener('focus', activate);
+      window.addEventListener('blur', handleBlur);
+      window.addEventListener('focus', handleFocus);
+      // タブ切り替えでは window.focus が発火しない場合があるため、可視性でも復帰させる。
+      document.addEventListener('visibilitychange', handleVisibilityChange);
       // 再生/停止（media イベントは bubble しないため capture で拾う）。
       document.addEventListener('play', markActive, true);
       document.addEventListener('pause', markActive, true);
 
-      markActive();
+      handleVisibilityChange();
     }
 
     function bootstrap() {
