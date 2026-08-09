@@ -591,8 +591,13 @@ import {
         }
       };
 
+      // Disney+ のマスクや Shadow DOM 内でイベント伝播が止められても拾えるよう、
+      // window のキャプチャ段階で監視する。
       for (const type of ['pointerover', 'pointermove', 'pointerdown', 'keydown']) {
-        document.addEventListener(type, handleUserActivity, { passive: true });
+        window.addEventListener(type, handleUserActivity, {
+          capture: true,
+          passive: true,
+        });
       }
       // ウィンドウが非アクティブになったら即座に隠す / 戻ったら復帰。
       window.addEventListener('blur', handleBlur);
