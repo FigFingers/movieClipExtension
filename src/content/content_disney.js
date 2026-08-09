@@ -569,6 +569,11 @@ import {
       };
       // blur / 非表示中は play・pause など操作以外のイベントで復帰させない。
       const markActive = () => (pageActive ? activate() : goIdle());
+      // 表示中のプレイヤー上にカーソルが戻った時点で、クリックを待たずに復帰する。
+      const handleUserActivity = () => {
+        pageActive = !document.hidden;
+        markActive();
+      };
       const handleBlur = () => {
         pageActive = false;
         goIdle();
@@ -586,8 +591,8 @@ import {
         }
       };
 
-      for (const type of ['pointermove', 'pointerdown', 'keydown']) {
-        document.addEventListener(type, markActive, { passive: true });
+      for (const type of ['pointerover', 'pointermove', 'pointerdown', 'keydown']) {
+        document.addEventListener(type, handleUserActivity, { passive: true });
       }
       // ウィンドウが非アクティブになったら即座に隠す / 戻ったら復帰。
       window.addEventListener('blur', handleBlur);
