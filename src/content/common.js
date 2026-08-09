@@ -6,6 +6,10 @@ import {
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
 export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
 
+// 表示中サイドバーの状態。再オープン時に元のプレイヤー幅を引き継ぎつつ、
+// 前インスタンスのリスナーを確実に外すためモジュールスコープで保持する。
+let activeMemoSession = null;
+
 export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
   if (host.includes('primevideo.com')) return 'Prime Video';
@@ -84,9 +88,23 @@ export function openMemoSidebar({
     document.querySelector('video')?.parentElement;
   if (!player) return null;
 
+  // 直前のサイドバーが残っている場合は旧セッションを無効化する。同じプレイヤーなら
+  // 最初に開く前の幅を引き継ぎ、別プレイヤーなら旧プレイヤーの幅をここで復元する。
+  const previousSession = activeMemoSession;
+  let originalWidth = player.style.width;
+  if (previousSession) {
+    previousSession.supersede();
+    previousSession.teardown();
+    previousSession.sidebar.remove();
+    if (previousSession.player === player) {
+      originalWidth = previousSession.originalWidth;
+    } else {
+      previousSession.player.style.width = previousSession.originalWidth || '100%';
+    }
+    activeMemoSession = null;
+  }
   document.getElementById(MEMO_SIDEBAR_ID)?.remove();
 
-  const originalWidth = player.style.width;
   player.style.transition = 'width .3s';
   player.style.width = `calc(100% - ${sidebarPct}%)`;
 
@@ -97,6 +115,11 @@ export function openMemoSidebar({
     height:100%;background:rgba(0,0,0,.85);padding:10px;
     box-sizing:border-box;z-index:9999;display:flex;flex-direction:column;gap:8px;`;
 
+  let removeKeyGuard;
+  let session;
+  let closed = false;
+  let superseded = false;
+
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
   const title = document.createElement('strong');
@@ -106,7 +129,14 @@ export function openMemoSidebar({
   closeBtn.textContent = '×';
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
   const closeSidebar = () => {
-    player.style.width = originalWidth || '100%';
+    if (closed) return;
+    closed = true;
+    removeKeyGuard?.();
+    // 保存完了が遅れても、現在表示中のセッションだけがプレイヤー幅を変更できる。
+    if (activeMemoSession === session) {
+      activeMemoSession = null;
+      player.style.width = originalWidth || '100%';
+    }
     sb.remove();
     onClose?.();
   };
@@ -141,16 +171,18 @@ export function openMemoSidebar({
   nameLabel.style.cssText = 'font-size:12px;color:#fff;';
   nameLabel.textContent = '名前:';
   const nameInput = document.createElement('input');
-  nameInput.style.cssText = 'width:100%;margin-top:4px;';
+  // 親 label の color:#fff を継承して白背景に埋もれるため色を明示する。
+  nameInput.style.cssText =
+    'width:100%;margin-top:4px;padding:4px 6px;box-sizing:border-box;color:#000;background:#fff;border:1px solid #ccc;border-radius:3px;';
   nameInput.value = data?.clipName || '';
   nameLabel.appendChild(nameInput);
   sb.appendChild(nameLabel);
 
-  const saveBtn = document.createElement('button');
-  saveBtn.textContent = '保存';
-  saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
-
-  saveBtn.onclick = () => {
+  // 二重送信防止（Enter リピート・保存連打・Enter/click 競合）。
+  let submitting = false;
+  const submit = () => {
+    if (submitting) return;
+    submitting = true;
     const enriched = {
       ...data,
       clipName: nameInput.value.trim(),
@@ -159,13 +191,82 @@ export function openMemoSidebar({
     Promise.resolve(result)
       .catch((error) => console.error('保存エラー:', error))
       .finally(() => {
-        videoPlayer?.play?.();
+        // 再オープンで置き換えられた旧セッションは、新しい入力中の再生状態に触れない。
+        if (
+          !superseded &&
+          (!activeMemoSession || activeMemoSession === session)
+        ) {
+          videoPlayer?.play?.();
+        }
         closeSidebar();
       });
   };
+
+  // パネル内キーはサイトへ渡さず入力欄で処理。Enter で保存（IME 変換確定・リピート除外）。
+  const onPanelKey = (e) => {
+    if (!sb.contains(e.target)) return;
+    if (
+      e.target === nameInput &&
+      e.type === 'keydown' &&
+      e.key === 'Enter' &&
+      !e.isComposing &&
+      !e.repeat
+    ) {
+      e.preventDefault();
+      submit();
+    }
+    e.stopPropagation();
+  };
+  const keyTypes = ['keydown', 'keyup', 'keypress'];
+  for (const type of keyTypes) {
+    window.addEventListener(type, onPanelKey, true);
+  }
+
+  // サイトがプレイヤーへフォーカスを引き戻すため、外れたら入力欄へ戻す（凍結防止の上限つき）。
+  let refocusBudget = 30;
+  let refocusWindowStart = 0;
+  const keepFocusInPanel = () => {
+    if (sb.contains(document.activeElement)) return;
+    const now = Date.now();
+    if (now - refocusWindowStart > 1000) {
+      refocusWindowStart = now;
+      refocusBudget = 30;
+    }
+    if (refocusBudget <= 0) return;
+    refocusBudget -= 1;
+    nameInput.focus();
+  };
+  document.addEventListener('focusin', keepFocusInPanel, true);
+
+  removeKeyGuard = () => {
+    for (const type of keyTypes) {
+      window.removeEventListener(type, onPanelKey, true);
+    }
+    document.removeEventListener('focusin', keepFocusInPanel, true);
+  };
+
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = '保存';
+  saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
+  saveBtn.onclick = submit;
   sb.appendChild(saveBtn);
 
   document.body.appendChild(sb);
+
+  session = {
+    sidebar: sb,
+    player,
+    originalWidth,
+    teardown: removeKeyGuard,
+    supersede: () => {
+      superseded = true;
+    },
+  };
+  activeMemoSession = session;
+
+  nameInput.focus();
+  nameInput.select();
+
   return sb;
 }
 
@@ -184,4 +285,37 @@ export function isAutoNavigation() {
 export function clearAutoNavigation() {
   sessionStorage.removeItem(AUTO_NAVIGATION_KEY);
   localStorage.removeItem(AUTO_NAVIGATION_KEY);
+}
+
+// === タブ可視性に応じた拡張 UI の表示制御 ===
+// 動画タブが裏に回った（document.hidden）ら拡張ボタンを隠し、戻ったら opacity の
+// トランジションでフェードインさせる。対象は markExtUi で EXT_UI_CLASS を付けた要素。
+// 状態は <html> の class で持たせて CSS 一括制御するため、タブが隠れている間に
+// 再注入されたボタンにも自動で効く。
+export const EXT_UI_CLASS = 'dext-ext-ui';
+const TAB_HIDDEN_CLASS = 'dext-tab-hidden';
+const VISIBILITY_STYLE_ID = 'dext-visibility-style';
+
+export function markExtUi(element) {
+  element?.classList.add(EXT_UI_CLASS);
+  return element;
+}
+
+function ensureVisibilityStyle() {
+  if (document.getElementById(VISIBILITY_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = VISIBILITY_STYLE_ID;
+  style.textContent = `
+    .${EXT_UI_CLASS} { transition: opacity .3s ease; }
+    .${TAB_HIDDEN_CLASS} .${EXT_UI_CLASS} { opacity: 0; pointer-events: none; }
+  `;
+  (document.head || document.documentElement).appendChild(style);
+}
+
+export function startTabVisibilityToggle() {
+  ensureVisibilityStyle();
+  const apply = () =>
+    document.documentElement.classList.toggle(TAB_HIDDEN_CLASS, document.hidden);
+  apply();
+  document.addEventListener('visibilitychange', apply);
 }
