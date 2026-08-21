@@ -1,50 +1,64 @@
 /** @typedef {import('../types/clip').CacheItem} CacheItem */
 
-window.addEventListener("clipSelected", (event) => {
+const PLAYBACK_OWNER_STORAGE_KEY = "playbackOwnerNonce";
+const PLAYBACK_OWNER_QUERY_PARAM = "dextPlaybackOwner";
+
+function createPlaybackOwnerNonce() {
+  return crypto.randomUUID?.() ||
+    `playback-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function beginPlaybackHandoff({ nonce, mode, clipId, snapshot }) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      {
+        type: "BEGIN_PLAYBACK_HANDOFF",
+        nonce,
+        context: { mode, clipId },
+        snapshot: {
+          ...snapshot,
+          [PLAYBACK_OWNER_STORAGE_KEY]: nonce,
+        },
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, reason: "background_unavailable" });
+          return;
+        }
+        resolve(response || { ok: false, reason: "handoff_failed" });
+      }
+    );
+  });
+}
+
+function addPlaybackOwnerToUrl(url, nonce) {
+  const target = new URL(url);
+  target.searchParams.set(PLAYBACK_OWNER_QUERY_PARAM, nonce);
+  return target.toString();
+}
+
+window.addEventListener("clipSelected", async (event) => {
   // 再生モードの遷移は 1 回の書き込みにまとめる。分割すると commentPanel が
   // 「新しい clip + 前回の playmode」を読み、直前のプレイリストのクリップの
   // コメントを表示する瞬間が生まれる。
-  safeSetStorage({
-    clip: withDetailClipId(getCookies(), event?.detail),
-    playClipSystemKey: 1,
-    playlistSystemKey: 0,
-    playmode: "clip",
+  const ownerNonce = createPlaybackOwnerNonce();
+  const clip = withDetailClipId(getCookies(), event?.detail);
+  await beginPlaybackHandoff({
+    nonce: ownerNonce,
+    mode: "clip",
+    clipId: clip.clipId ?? clip.id,
+    snapshot: {
+      clip,
+      playClipSystemKey: 1,
+      playlistSystemKey: 0,
+      playmode: "clip",
+    },
   });
 });
 
 // ------------------------------------------------------
 // Chrome storage 安全書き込みユーティリティ
 // ------------------------------------------------------
-const SENSITIVE_LOG_KEYS = new Set([
-  "authorization",
-  "extensionauthtoken",
-]);
-
-function sanitizeForLog(value) {
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeForLog(item));
-  }
-
-  if (!value || typeof value !== "object") {
-    return value;
-  }
-
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      key,
-      SENSITIVE_LOG_KEYS.has(key.toLowerCase()) ? "[redacted]" : sanitizeForLog(item),
-    ])
-  );
-}
-
-async function safeSetStorage(data) {
-  try {
-    await chrome.storage.local.set(data);
-  } catch (err) {
-    console.warn("[EXT] chrome.storage.local.set failed:", sanitizeForLog(data), err);
-  }
-}
-
 // ------------------------------------------------------
 // window.postMessage 受信ハンドラ
 // ------------------------------------------------------
@@ -60,11 +74,17 @@ window.addEventListener("message", async (event) => {
   // ---- クリップデータ受信 ----
   if (msg.type === "SET_CLIP_DATA") {
     const { clip } = msg.payload;
-    await safeSetStorage({
-      clip,
-      playClipSystemKey: 1,
-      playlistSystemKey: 0,
-      playmode: "clip",
+    const ownerNonce = createPlaybackOwnerNonce();
+    await beginPlaybackHandoff({
+      nonce: ownerNonce,
+      mode: "clip",
+      clipId: clip?.clipId ?? clip?.id,
+      snapshot: {
+        clip,
+        playClipSystemKey: 1,
+        playlistSystemKey: 0,
+        playmode: "clip",
+      },
     });
   }
 
@@ -100,13 +120,25 @@ window.addEventListener("message", async (event) => {
     // 単体再生の clip は破棄する。サイト側もプレイリスト開始時に clipId cookie を
     // 失効させており、プレイリスト再生中に前回の単体クリップを現在クリップとして
     // 解決できる余地を残さない。
-    await safeSetStorage({
-      clip: null,
-      playQueue: normalizedQueue,
-      currentClipOrder: firstOrder,
-      playmode: "playlist",
+    const ownerNonce = createPlaybackOwnerNonce();
+    const firstClip = normalizedQueue.find((item) => item.order === firstOrder);
+    const handoff = await beginPlaybackHandoff({
+      nonce: ownerNonce,
+      mode: "playlist",
+      clipId: firstClip?.clipId ?? firstClip?.id,
+      snapshot: {
+        clip: null,
+        playQueue: normalizedQueue,
+        currentClipOrder: firstOrder,
+        currentClipId: firstClip?.clipId ?? firstClip?.id,
+        nextClip: firstClip,
+        playClipSystemKey: 0,
+        playlistSystemKey: 1,
+        playmode: "playlist",
+      },
     });
-    playQueue(normalizedQueue);
+    if (!handoff?.ok) return;
+    playQueue(normalizedQueue, ownerNonce);
   }
 
   // EXT/SET_SESSION ハンドラは削除済み (issue #98)。ペイロードを無検証で
@@ -224,7 +256,7 @@ function buildServiceUrl(service, rawUrl, startTime, paramKey = "t") {
 /**
  * @param {CacheItem[]} queue
  */
-async function playQueue(queue) {
+async function playQueue(queue, ownerNonce) {
   if (!Array.isArray(queue) || queue.length === 0) {
     console.warn("[EXT] playQueue: キューが空です");
     return;
@@ -246,15 +278,8 @@ async function playQueue(queue) {
     return;
   }
 
-  await safeSetStorage({ playmode: "playlist", nextClip });
-
   setTimeout(() => {
     // 再生開始位置は先頭固定(0)ではなく、実際に選んだ最小 order のクリップに合わせる。
-    chrome.storage.local.set({
-      playClipSystemKey: 0,
-      playlistSystemKey: 1,
-      currentClipOrder: Number.isFinite(Number(nextClip.order)) ? Number(nextClip.order) : 0,
-    });
-    window.location.href = url;
+    window.location.href = addPlaybackOwnerToUrl(url, ownerNonce);
   }, 300);
 }

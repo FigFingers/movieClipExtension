@@ -2,6 +2,11 @@ import {
   fetchClipComments,
   postClipComment,
 } from './comments.js';
+import { createPlaybackOwnershipManager } from './playbackOwnership.js';
+import {
+  saveExtensionAuthTokenInBackground,
+  unlinkExtensionInBackground,
+} from './authState.js';
 import { openLoginTab, syncPendingQueue } from './sync.js';
 import { checkAndRefreshToken } from './tokenRefresh.js';
 
@@ -13,8 +18,14 @@ const DEMO_COOLDOWN_MS = 5 * 60 * 1000;
 
 const TOKEN_REFRESH_ALARM = 'extension-token-refresh';
 const SYNC_RETRY_ALARM = 'extension-sync-retry';
+const PLAYBACK_HANDOFF_ALARM_PREFIX = 'playback-handoff-cleanup:';
 const TOKEN_REFRESH_PERIOD_MINUTES = 6 * 60;
 const SYNC_RETRY_PERIOD_MINUTES = 15;
+
+const playbackOwnership = createPlaybackOwnershipManager({
+  sessionStorage: chrome.storage.session,
+  localStorage: chrome.storage.local,
+});
 
 function getMajor(v) {
   return parseInt(String(v).split('.')[0] || '0', 10);
@@ -83,9 +94,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }), sendResponse);
   }
 
+  if (message?.type === 'SAVE_EXTENSION_AUTH_TOKEN') {
+    return respondToAsyncRequest(saveExtensionAuthTokenInBackground({
+      extensionInstanceId: message.extensionInstanceId,
+      extensionAuthToken: message.extensionAuthToken,
+      expiresAt: message.expiresAt,
+    }), sendResponse, 'save_auth_failed');
+  }
+
+  if (message?.type === 'UNLINK_EXTENSION') {
+    return respondToAsyncRequest(unlinkExtensionInBackground({
+      extensionInstanceId: message.extensionInstanceId,
+    }), sendResponse, 'unlink_failed');
+  }
+
   if (message?.type === 'OPEN_LOGIN_TAB') {
     return respondToAsyncRequest(
-      openLoginTab({ force: true }),
+      openLoginTab(),
       sendResponse,
       'open_login_failed'
     );
@@ -98,6 +123,10 @@ function scheduleAlarms() {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith(PLAYBACK_HANDOFF_ALARM_PREFIX)) {
+    void playbackOwnership.cleanupExpired();
+    return;
+  }
   if (alarm.name === TOKEN_REFRESH_ALARM) {
     void checkAndRefreshToken();
     return;
@@ -110,6 +139,100 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onStartup.addListener(() => {
   scheduleAlarms();
+  void playbackOwnership.reset();
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'BEGIN_PLAYBACK_HANDOFF') {
+    const handoff = playbackOwnership.beginHandoff({
+      nonce: message.nonce,
+      sourceTabId: sender?.tab?.id,
+      context: message.context,
+      snapshot: message.snapshot,
+    }).then((result) => {
+      if (result?.ok) {
+        chrome.alarms.create(
+          `${PLAYBACK_HANDOFF_ALARM_PREFIX}${message.nonce}`,
+          { delayInMinutes: 0.5 }
+        );
+      }
+      return result;
+    });
+    return respondToAsyncRequest(
+      handoff,
+      sendResponse,
+      'playback_handoff_failed'
+    );
+  }
+
+  if (message?.type === 'CLAIM_PLAYBACK_OWNERSHIP') {
+    return respondToAsyncRequest(
+      playbackOwnership.claim({
+        tabId: sender?.tab?.id,
+        openerTabId: sender?.tab?.openerTabId,
+        nonce: message.nonce,
+        route: message.route,
+      }),
+      sendResponse,
+      'playback_claim_failed'
+    );
+  }
+
+  if (message?.type === 'UPDATE_PLAYBACK_OWNERSHIP') {
+    return respondToAsyncRequest(
+      playbackOwnership.update({
+        tabId: sender?.tab?.id,
+        nonce: message.nonce,
+        context: message.context,
+        patch: message.patch,
+        route: message.route,
+      }),
+      sendResponse,
+      'playback_update_failed'
+    );
+  }
+
+  if (message?.type === 'PREPARE_PLAYBACK_NAVIGATION') {
+    return respondToAsyncRequest(
+      playbackOwnership.prepareNavigation({
+        tabId: sender?.tab?.id,
+        nonce: message.nonce,
+        nextUrl: message.nextUrl,
+      }),
+      sendResponse,
+      'playback_navigation_failed'
+    );
+  }
+
+  if (message?.type === 'RELEASE_PLAYBACK_OWNERSHIP') {
+    return respondToAsyncRequest(
+      playbackOwnership.release({
+        tabId: sender?.tab?.id,
+        nonce: message.nonce,
+      }),
+      sendResponse,
+      'playback_release_failed'
+    );
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void playbackOwnership.removeTab(tabId);
+});
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (Number.isInteger(tab?.openerTabId)) {
+    void playbackOwnership.bindTarget({
+      tabId: tab.id,
+      openerTabId: tab.openerTabId,
+    });
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    void playbackOwnership.handleTabNavigation({ tabId, url: changeInfo.url });
+  }
 });
 
 // SW が起きたタイミングで期限チェックと積み残しの再送を行う(どちらも未連携・空キュー

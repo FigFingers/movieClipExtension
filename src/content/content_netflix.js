@@ -7,6 +7,7 @@ import {
 import { getApiEndpoint } from './../api.js';
 import {
   clearAutoNavigation,
+  closeMemoSidebar,
   detectService,
   handleClipTransition,
   isAutoNavigation,
@@ -14,15 +15,34 @@ import {
   markExtUi,
   MEMO_SIDEBAR_ID,
   openMemoSidebar,
+  requestCloseCommentPanel,
   sendData,
   startTabVisibilityToggle,
   requestSeek
 } from './common.js';
 import {
   COMMENT_PANEL_ID,
+  COMMENT_PANEL_OPEN_STATE_EVENT,
+  closeCommentPanel,
   isCommentPanelOpen,
   toggleCommentPanel
 } from './commentPanel.js';
+import {
+  clearPlaybackContext,
+  ensurePlaybackContext,
+  setPlaybackContext
+} from './playbackContext.js';
+import { commitSelectedClip } from './netflixClipSelection.js';
+import {
+  addPlaybackOwnerToUrl,
+  beginPlaybackHandoff,
+  claimPlaybackOwnership,
+  createPlaybackOwnerNonce,
+  getTabPlaybackOwnerNonce,
+  preparePlaybackNavigation,
+  releasePlaybackOwnership,
+  updatePlaybackOwnership
+} from './playbackOwnership.js';
 import { setCookie } from '../util/cookies.js';
 import { buildServiceUrl } from '../util/services.js';
 
@@ -44,25 +64,7 @@ function initializeNetflixPlayback() {
     return;
   }
   netflixPlaybackInitialized = true;
-
-  if (!sessionStorage.getItem("nfClipInitialized")) {
-    chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey", "playmode"], (res) => {
-      const clipModeActive = res.playClipSystemKey === 1;
-      const playlistActive = res.playlistSystemKey === 1;
-      const playmodeActive = res.playmode === "clip" || res.playmode === "playlist";
-
-      if (!clipModeActive && !playlistActive && !playmodeActive) {
-        chrome.storage.local.set({
-          playClipSystemKey: 0,
-          playlistSystemKey: 0,
-          currentClipOrder: 0,
-          playmode: null,
-          clip: null
-        });
-      }
-    });
-    sessionStorage.setItem("nfClipInitialized", "true");
-  }
+  ensurePlaybackContext();
 
   // ---------------------------------------------------------------------------
   // グローバル変数
@@ -89,6 +91,84 @@ function initializeNetflixPlayback() {
   let isLooping = false;
   let togglekey = false;
   let uiWarmerInterval = null;
+  let activePlaybackOwnerNonce = null;
+  let playbackLocation = null;
+  let stopClipEndMonitor = null;
+  let activePlaylistQueue = null;
+  let activePlaylistOrder = null;
+  let playbackGeneration = 0;
+  let removePendingMetadataListener = null;
+
+  function applyPlaybackContext(context, ownerNonce) {
+    setPlaybackContext(context);
+    activePlaybackOwnerNonce = ownerNonce;
+    playbackLocation = routeIdentity(location.href);
+    playbackGeneration += 1;
+  }
+
+  async function claimPlaybackSession(ownerNonce) {
+    try {
+      const claim = await claimPlaybackOwnership({ nonce: ownerNonce });
+      if (
+        !claim?.ok ||
+        typeof claim.nonce !== 'string' ||
+        claim.nonce.length < 8
+      ) {
+        throw new Error(claim?.reason || 'Playback claim failed');
+      }
+      applyPlaybackContext(claim.context, claim.nonce);
+      return claim;
+    } catch {
+      clearPlaybackContext();
+      return null;
+    }
+  }
+
+  async function transitionPlaybackSession(mode, clip, patch) {
+    const clipId = clip?.clipId ?? clip?.id;
+    const update = await updatePlaybackOwnership({
+      nonce: activePlaybackOwnerNonce,
+      mode,
+      clipId,
+      patch
+    });
+    if (!update?.ok) {
+      deactivatePlaybackContext();
+      return null;
+    }
+    applyPlaybackContext(update.context, activePlaybackOwnerNonce);
+    return update;
+  }
+
+  function deactivatePlaybackContext() {
+    const ownerNonce = activePlaybackOwnerNonce;
+    activePlaybackOwnerNonce = null;
+    playbackLocation = null;
+    playbackGeneration += 1;
+    clearPlaybackContext();
+    closeCommentPanel();
+    releasePlaybackOwnership(ownerNonce);
+
+    stopClipEndMonitor?.();
+    stopClipEndMonitor = null;
+    removePendingMetadataListener?.();
+    removePendingMetadataListener = null;
+    if (countdownIntervalId !== null) {
+      clearInterval(countdownIntervalId);
+      countdownIntervalId = null;
+    }
+    stopUIWarmer();
+    clipData = null;
+    activePlaylistQueue = null;
+    activePlaylistOrder = null;
+  }
+
+  function handlePlaybackRouteChange(nextUrl) {
+    const resolvedUrl = routeIdentity(nextUrl || location.href);
+    if (!activePlaybackOwnerNonce || resolvedUrl === playbackLocation) return;
+    if (isAutoNavigation()) return;
+    deactivatePlaybackContext();
+  }
 
   clearAutoNavigation();
   bootstrapRecordControls();
@@ -218,6 +298,7 @@ function initializeNetflixPlayback() {
 
       window.addEventListener("historyChange", (e) => {
         resetRecordState();
+        handlePlaybackRouteChange(e.detail?.url);
         chrome.runtime.sendMessage({ type: "HISTORY_CHANGE", data: e.detail });
       });
 
@@ -292,14 +373,28 @@ function initializeNetflixPlayback() {
         document.querySelector('div[data-uia="player"]') ||
         document.querySelector(".watch-video--player-view") ||
         document.body;
-      toggleCommentPanel({
+      const open = toggleCommentPanel({
         mountEl,
         triggerEl: btn,
         onOpenChange: updateOpenState
       });
+      updateOpenState(open);
     });
     return { btn, svg: svgIcon };
   }
+
+  function updateCurrentCommentButton(open) {
+    const button = document.getElementById(COMMENT_BUTTON_ID);
+    if (!button) return;
+    button.setAttribute("aria-expanded", String(open));
+    const icon = button.querySelector("svg");
+    if (icon) icon.style.color = open ? COLOR_LOOPING : COLOR_DEFAULT;
+  }
+
+  const handleCommentPanelOpenState = (event) => {
+    updateCurrentCommentButton(Boolean(event?.detail?.open));
+  };
+  window.addEventListener(COMMENT_PANEL_OPEN_STATE_EVENT, handleCommentPanelOpenState);
 
   const uiObserver = new MutationObserver(() => {
     const controls    = document.querySelector(SELECTOR_STANDARD);
@@ -363,24 +458,35 @@ function initializeNetflixPlayback() {
     }
   });
   uiObserver.observe(document.body, { childList: true, subtree: true });
-  window.addEventListener("beforeunload", () => uiObserver.disconnect());
+  window.addEventListener("beforeunload", () => {
+    uiObserver.disconnect();
+    window.removeEventListener(
+      COMMENT_PANEL_OPEN_STATE_EVENT,
+      handleCommentPanelOpenState
+    );
+  });
 
   // ---------------------------------------------------------------------------
   // サイドバー
   // ---------------------------------------------------------------------------
   function toggleSidebar() {
     const sb = document.getElementById(SIDEBAR_ID);
-    sb ? closeSidebar() : openSidebar();
+    sb?.dataset?.sidebarType === "clip-list" ? closeSidebar() : openSidebar();
   }
 
   function openSidebar() {
     const player = document.querySelector(".watch-video--player-view");
     if (!player) return;
+    closeMemoSidebar();
+    requestCloseCommentPanel();
+    const originalPlayerWidth = player.style.width;
     player.style.transition = "width .3s";
     player.style.width = `calc(100% - ${SIDEBAR_PCT}%)`;
 
     const sb = document.createElement("div");
     sb.id = SIDEBAR_ID;
+    sb.dataset.sidebarType = "clip-list";
+    sb.dataset.originalPlayerWidth = originalPlayerWidth;
     sb.style.cssText = `
       position:fixed;top:0;right:0;width:${SIDEBAR_PCT}%;
       height:100%;background:rgba(0,0,0,.9);color:white;
@@ -409,9 +515,7 @@ function initializeNetflixPlayback() {
   }
 
   function closeSidebar() {
-    const player = document.querySelector(".watch-video--player-view");
-    if (player) player.style.width = "100%";
-    document.getElementById(SIDEBAR_ID)?.remove();
+    closeMemoSidebar();
   }
 
   /**
@@ -474,9 +578,27 @@ function initializeNetflixPlayback() {
       const res = await fetch(getApiEndpoint(`fetchClip?id=${encodeURIComponent(clipId)}`));
       if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
       const data = await res.json();
-      setClipDataOnCookies(data);
-      redirectToClip(data);
-      chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+      const ownerNonce = createPlaybackOwnerNonce();
+      await commitSelectedClip({
+        data,
+        requestedClipId: clipId,
+        ownerNonce,
+        storage: {
+          async set(snapshot) {
+            const handoff = await beginPlaybackHandoff({
+              nonce: ownerNonce,
+              mode: 'clip',
+              clipId: snapshot.currentClipId,
+              snapshot
+            });
+            if (!handoff?.ok) {
+              throw new Error('Playback handoff registration failed');
+            }
+          }
+        },
+        setCookies: setClipDataOnCookies,
+        openClip: (selectedClip) => redirectToClip(selectedClip, ownerNonce)
+      });
     } catch (err) {
       console.error("クリップ選択処理でエラー:", err);
     }
@@ -500,7 +622,7 @@ function initializeNetflixPlayback() {
     }
   }
 
-  function redirectToClip({ url, service, startTime }) {
+  function redirectToClip({ url, service, startTime }, ownerNonce) {
     if (!url || !service) {
       alert("URL または サービス情報が不正です");
       return;
@@ -510,29 +632,27 @@ function initializeNetflixPlayback() {
       alert(`未対応のサービス: ${service}`);
       return;
     }
-    window.open(finalUrl, "_blank");
+    window.open(addPlaybackOwnerToUrl(finalUrl, ownerNonce), "_blank");
   }
 
   // ---------------------------------------------------------------------------
   // Clip再生モード
   // ---------------------------------------------------------------------------
-  function loadClipFromStorage() {
-    return new Promise((resolve, reject) => {
-      chrome.storage.local.get(['playClipSystemKey', 'clip'], res => {
-        if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
-        if (res.playClipSystemKey === 1 && res.clip) {
-          clipData = {
-            startTime: Number(res.clip.startTime ?? res.clip.starttime),
-            endTime:   Number(res.clip.endTime   ?? res.clip.endtime),
-            title:     res.clip.title
-          };
-          console.info('[Clip] loaded:', clipData);
-          resolve();
-        } else {
-          resolve();
-        }
-      });
-    });
+  function loadClipFromSession(session) {
+    const snapshot = session?.snapshot;
+    if (session?.context?.mode !== 'clip' || snapshot?.playClipSystemKey !== 1 || !snapshot.clip) {
+      clipData = null;
+      clearPlaybackContext();
+      return false;
+    }
+    clipData = {
+      startTime: Number(snapshot.clip.startTime ?? snapshot.clip.starttime),
+      endTime: Number(snapshot.clip.endTime ?? snapshot.clip.endtime),
+      title: snapshot.clip.title,
+      clipId: snapshot.clip.clipId ?? snapshot.clip.id
+    };
+    console.info('[Clip] loaded:', clipData);
+    return true;
   }
 
   function waitForVideoElement() {
@@ -547,10 +667,10 @@ function initializeNetflixPlayback() {
     });
   }
 
-  async function init() {
-    chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0, playmode: "clip" });
+  async function init(session) {
     try {
-      await loadClipFromStorage();
+      const loaded = loadClipFromSession(session);
+      if (!loaded) return;
       videoPlayer = await waitForVideoElement();
       setupPlayer("clip");
     } catch (err) {
@@ -561,20 +681,24 @@ function initializeNetflixPlayback() {
   // ---------------------------------------------------------------------------
   // Playlist再生モード
   // ---------------------------------------------------------------------------
-  async function startPlaylistMode() {
-    chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
-    chrome.storage.local.get(["playQueue", "currentClipOrder"], async ({ playQueue, currentClipOrder }) => {
+  async function startPlaylistMode(session) {
+      let { playQueue, currentClipOrder } = session?.snapshot || {};
+      if (session?.context?.mode !== 'playlist') return;
       if (!Array.isArray(playQueue) || playQueue.length === 0) {
+        clearPlaybackContext();
         console.warn("[Playlist] playQueue が存在しません");
         return;
       }
-      playQueue.sort((a, b) => a.order - b.order);
+      playQueue = [...playQueue].sort((a, b) => a.order - b.order);
       const order = Number.isInteger(currentClipOrder) ? currentClipOrder : 0;
       const currentClip = playQueue.find(c => c.order === order);
       if (!currentClip) {
+        clearPlaybackContext();
         console.warn("[Playlist] 該当clipが見つかりません:", order);
         return;
       }
+      activePlaylistQueue = playQueue;
+      activePlaylistOrder = currentClip.order;
       clipData = {
         startTime: Number(currentClip.startTime ?? currentClip.starttime),
         endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
@@ -582,7 +706,6 @@ function initializeNetflixPlayback() {
       };
       videoPlayer = await waitForVideoElement();
       setupPlayer("playlist");
-    });
   }
 
   async function playlistNextClip(playQueue, currentOrder) {
@@ -597,9 +720,18 @@ function initializeNetflixPlayback() {
     const isLast = currentIndex === sortedQueue.length - 1;
     const next = isLast ? sortedQueue[0] : sortedQueue[currentIndex + 1];
 
-    await new Promise((resolve) => {
-      chrome.storage.local.set({ currentClipOrder: next.order, currentClipId: next.id }, resolve);
+    const transitioned = await transitionPlaybackSession('playlist', next, {
+      playQueue: sortedQueue,
+      currentClipOrder: next.order,
+      currentClipId: next.clipId ?? next.id,
+      nextClip: next,
+      playClipSystemKey: 0,
+      playlistSystemKey: 1,
+      playmode: 'playlist'
     });
+    if (!transitioned) return;
+    activePlaylistQueue = sortedQueue;
+    activePlaylistOrder = next.order;
 
     clipData = {
       startTime: Number(next.startTime ?? next.starttime),
@@ -612,10 +744,12 @@ function initializeNetflixPlayback() {
       nextUrl: next.url,
 
       onSameUrl: async () => {
+        const transitionGeneration = playbackGeneration;
         startUIWarmer();
         const targetTime = Math.floor(next.startTime);
 
         for (;;) {
+          if (transitionGeneration !== playbackGeneration) return;
           try {
             await requestSeek({ service: 'Netflix', seconds: targetTime });
           } catch (err) {
@@ -623,6 +757,7 @@ function initializeNetflixPlayback() {
           }
 
           await new Promise(r => setTimeout(r, 300));
+          if (transitionGeneration !== playbackGeneration) return;
 
           const currentSec = Math.floor(videoPlayer?.currentTime ?? 0);
           if (Math.abs(currentSec - targetTime) <= 1) {
@@ -631,13 +766,25 @@ function initializeNetflixPlayback() {
           }
         }
 
+        if (transitionGeneration !== playbackGeneration || !clipData) return;
         monitorClipEnd(clipData.endTime, clipData.startTime, "playlist");
         startCountdownLogger(clipData.endTime);
       },
 
-      onDifferentUrl: () => {
+      onDifferentUrl: async () => {
         markAutoNavigation("playlist");
-        const url = `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`;
+        const url = addPlaybackOwnerToUrl(
+          `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`,
+          activePlaybackOwnerNonce
+        );
+        const prepared = await preparePlaybackNavigation(
+          activePlaybackOwnerNonce,
+          url
+        );
+        if (!prepared?.ok) {
+          deactivatePlaybackContext();
+          return;
+        }
         setTimeout(() => { window.location.href = url; }, 150);
       }
     });
@@ -655,7 +802,10 @@ function initializeNetflixPlayback() {
       return;
     }
 
+    const setupGeneration = playbackGeneration;
     const onReady = () => {
+      removePendingMetadataListener = null;
+      if (setupGeneration !== playbackGeneration || !clipData) return;
       monitorClipEnd(end, start, mode);
       startCountdownLogger(end);
     };
@@ -664,31 +814,41 @@ function initializeNetflixPlayback() {
       onReady();
     } else {
       videoPlayer.addEventListener('loadedmetadata', onReady, { once: true });
+      removePendingMetadataListener?.();
+      removePendingMetadataListener = () =>
+        videoPlayer?.removeEventListener('loadedmetadata', onReady);
     }
 
     videoPlayer.addEventListener('error', e => console.error('[Video] error:', e));
   }
 
   function monitorClipEnd(end, start, mode /* "clip" | "playlist" */) {
+    stopClipEndMonitor?.();
+    const monitoredPlayer = videoPlayer;
+    let stopped = false;
+    const stopMonitor = () => {
+      if (stopped) return;
+      stopped = true;
+      monitoredPlayer?.removeEventListener("timeupdate", onTimeUpdate);
+      if (stopClipEndMonitor === stopMonitor) stopClipEndMonitor = null;
+    };
+    stopClipEndMonitor = stopMonitor;
+
     function onTimeUpdate() {
-      if (videoPlayer.currentTime + EPSILON >= end) {
+      if (monitoredPlayer.currentTime + EPSILON >= end) {
         console.info("[Clip] Reached end:", clipData?.title || "unknown");
-        videoPlayer.removeEventListener("timeupdate", onTimeUpdate);
+        stopMonitor();
         clearInterval(countdownIntervalId);
 
         if (mode === "playlist") {
-          chrome.storage.local.get(
-            ["playQueue", "currentClipOrder"],
-            (res) => {
-              const { playQueue, currentClipOrder } = res;
-              if (Array.isArray(playQueue)) {
-                playlistNextClip(playQueue, currentClipOrder ?? 0);
-              } else {
-                console.warn("[Playlist] playQueue が無効。playlist終了");
-                chrome.storage.local.set({ playlistSystemKey: 0 });
-              }
-            }
-          );
+          if (Array.isArray(activePlaylistQueue)) {
+            void playlistNextClip(
+              activePlaylistQueue,
+              activePlaylistOrder ?? 0
+            );
+          } else {
+            console.warn("[Playlist] playQueue が無効。playlist終了");
+          }
         } else {
           try {
             requestSeek({ service: 'Netflix', seconds: start, videoElement: videoPlayer });
@@ -700,7 +860,7 @@ function initializeNetflixPlayback() {
         }
       }
     }
-    videoPlayer.addEventListener("timeupdate", onTimeUpdate);
+    monitoredPlayer.addEventListener("timeupdate", onTimeUpdate);
   }
 
   function startCountdownLogger(end) {
@@ -750,49 +910,33 @@ function initializeNetflixPlayback() {
   // ページロード時のモード起動
   // ---------------------------------------------------------------------------
   onWindowLoad(async () => {
-    chrome.storage.local.get(["playClipSystemKey", "playlistSystemKey", "playmode"], async ({ playClipSystemKey, playlistSystemKey, playmode }) => {
-      if (playmode === "playlist") {
-        await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1 });
-        await startPlaylistMode();
-        return;
-      }
-
-      if (playmode === "clip") {
-        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
-        await init();
-        return;
-      }
-
-      if (playClipSystemKey === 1 && playlistSystemKey === 1) {
-        console.warn("[Clip] 両モードがON。Clipを優先して矯正します。");
-        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
-        await init();
-        return;
-      }
-
-      if (playClipSystemKey === 1) {
-        await init();
-      } else if (playlistSystemKey === 1) {
-        await startPlaylistMode();
-      }
-    });
+    const ownerNonce = getTabPlaybackOwnerNonce();
+    const session = await claimPlaybackSession(ownerNonce);
+    if (!session) return;
+    if (session.context.mode === 'playlist') {
+      await startPlaylistMode(session);
+    } else if (session.context.mode === 'clip') {
+      await init(session);
+    }
   });
 
   // ---------------------------------------------------------------------------
   // 離脱処理
   // ---------------------------------------------------------------------------
   window.addEventListener("beforeunload", () => {
-    if (isAutoNavigation()) {
-      return;
-    }
-
-    chrome.storage.local.set({
-      playClipSystemKey: 0,
-      playlistSystemKey: 0,
-      currentClipOrder: 0,
-      playmode: null
-    });
+    playbackGeneration += 1;
+    clearPlaybackContext();
+    closeCommentPanel();
   });
 }
 
 initializeNetflixPlayback();
+
+function routeIdentity(url) {
+  try {
+    const parsed = new URL(url, location.href);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return String(url || '');
+  }
+}

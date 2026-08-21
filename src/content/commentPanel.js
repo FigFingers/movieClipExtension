@@ -1,6 +1,16 @@
 import { storageGet } from './../shared/storage.js';
+import {
+  CLOSE_COMMENT_PANEL_EVENT,
+  closeMemoSidebar,
+} from './common.js';
+import {
+  PLAYBACK_CONTEXT_CHANGED_EVENT,
+  readPlaybackContext,
+} from './playbackContext.js';
 
 export const COMMENT_PANEL_ID = 'ext-comment-panel';
+export const COMMENT_PANEL_OPEN_STATE_EVENT =
+  'ext:comment-panel-open-state';
 
 const COMMENT_LIMIT = 20;
 const COMMENT_BODY_MAX_LENGTH = 500;
@@ -12,8 +22,7 @@ const PLAYBACK_STORAGE_KEYS = [
   'playQueue',
   'currentClipOrder',
 ];
-const WATCHED_STORAGE_KEYS = new Set([
-  ...PLAYBACK_STORAGE_KEYS,
+const WATCHED_AUTH_STORAGE_KEYS = new Set([
   'extensionAuthToken',
   'extensionLinked',
 ]);
@@ -65,7 +74,7 @@ const PANEL_STYLES = `
   }
 
   button,
-  textarea {
+  ::slotted(textarea) {
     font: inherit;
   }
 
@@ -76,7 +85,7 @@ const PANEL_STYLES = `
   }
 
   button:focus-visible,
-  textarea:focus-visible {
+  ::slotted(textarea:focus-visible) {
     outline: 2px solid #76b7ff;
     outline-offset: 2px;
   }
@@ -182,7 +191,8 @@ const PANEL_STYLES = `
     color: #d0d7de;
   }
 
-  .textarea {
+  ::slotted(.textarea) {
+    box-sizing: border-box;
     width: 100%;
     min-height: 82px;
     max-height: 180px;
@@ -193,6 +203,7 @@ const PANEL_STYLES = `
     color: #111;
     background: #fff;
     line-height: 1.45;
+    pointer-events: auto;
   }
 
   .submit {
@@ -280,6 +291,11 @@ export function resolveCurrentClipIdFromState(state = {}) {
 }
 
 export async function resolveCurrentClipId() {
+  const localPlayback = readPlaybackContext();
+  if (localPlayback.initialized) {
+    return localPlayback.context?.clipId ?? null;
+  }
+
   const state = await storageGet(PLAYBACK_STORAGE_KEYS);
   return resolveCurrentClipIdFromState(state);
 }
@@ -348,7 +364,8 @@ function updateSubmitState(controller) {
   controller.submitButton.disabled =
     !controller.composeAvailable || controller.posting || !hasBody;
   controller.textarea.disabled = !controller.composeAvailable;
-  controller.refreshButton.disabled = controller.posting;
+  controller.refreshButton.disabled =
+    controller.posting || controller.loadingBase || controller.refreshingContext;
 }
 
 function setComposeAvailable(controller, available) {
@@ -411,7 +428,8 @@ function renderComments(controller) {
     controller.loadMoreButton.hidden = !controller.hasNext;
   }
 
-  controller.loadMoreButton.disabled = controller.loadingMore;
+  controller.loadMoreButton.disabled =
+    controller.loadingMore || controller.loadingBase;
   controller.loadMoreButton.textContent = controller.loadingMore
     ? '読込中…'
     : 'さらに表示';
@@ -434,19 +452,51 @@ function mergeComments(existing, incoming) {
   return merged;
 }
 
-async function openLoginPage(controller) {
-  setStatus(controller, 'ログインページを開いています…');
-  const result = await sendRuntimeMessage({ type: 'OPEN_LOGIN_TAB' });
-  if (controller.closed) return;
+export function shouldClearSubmittedDraft(currentValue, submittedValue) {
+  return currentValue === submittedValue;
+}
 
-  if (result?.ok) {
-    setStatus(
-      controller,
-      'ログインページを開きました。連携後に再試行してください。',
-      'success'
-    );
-  } else {
-    setStatus(controller, 'ログインページを開けませんでした。', 'error');
+export function isAmbiguousPostFailure(reason) {
+  return reason === 'invalid_response'
+    || reason === 'network_error'
+    || reason === 'timeout'
+    || reason === 'background_unavailable'
+    || reason === 'request_failed';
+}
+
+async function openLoginPage(controller) {
+  if (controller.closed || controller.openingLogin) return;
+  controller.openingLogin = true;
+  for (const button of controller.actions.querySelectorAll('button')) {
+    button.disabled = true;
+  }
+  setStatus(controller, 'ログインページを開いています…');
+  try {
+    const result = await sendRuntimeMessage({ type: 'OPEN_LOGIN_TAB' });
+    if (controller.closed) return;
+
+    if (result?.ok && result?.skipped && result?.reason === 'cooldown') {
+      setStatus(
+        controller,
+        'ログインページは直前に開いています。連携後に再試行してください。',
+        'success'
+      );
+    } else if (result?.ok) {
+      setStatus(
+        controller,
+        'ログインページを開きました。連携後に再試行してください。',
+        'success'
+      );
+    } else {
+      setStatus(controller, 'ログインページを開けませんでした。', 'error');
+    }
+  } finally {
+    controller.openingLogin = false;
+    if (!controller.closed) {
+      for (const button of controller.actions.querySelectorAll('button')) {
+        button.disabled = false;
+      }
+    }
   }
 }
 
@@ -491,7 +541,42 @@ function showFetchError(controller, result, retry) {
   setActions(controller, [createActionButton('再試行', retry)]);
 }
 
-async function loadComments(
+function loadComments(controller, options = {}) {
+  const append = options.append === true;
+  if (controller.closed || controller.clipId === null) {
+    return Promise.resolve();
+  }
+  if (append && (controller.loadingMore || controller.loadingBase)) {
+    return Promise.resolve();
+  }
+  if (!append && controller.baseLoadPromise) {
+    return controller.baseLoadPromise;
+  }
+
+  if (!append) {
+    controller.loadingBase = true;
+    controller.loadingMore = false;
+    updateSubmitState(controller);
+  }
+
+  const loadPromise = performLoadComments(controller, options);
+  if (!append) {
+    controller.baseLoadPromise = loadPromise;
+    const finishBaseLoad = () => {
+      if (controller.baseLoadPromise !== loadPromise) return;
+      controller.baseLoadPromise = null;
+      controller.loadingBase = false;
+      if (!controller.closed) {
+        controller.loadMoreButton.disabled = controller.loadingMore;
+        updateSubmitState(controller);
+      }
+    };
+    loadPromise.then(finishBaseLoad, finishBaseLoad);
+  }
+  return loadPromise;
+}
+
+async function performLoadComments(
   controller,
   { cursor, append = false, contextVersion = controller.contextVersion } = {}
 ) {
@@ -571,7 +656,46 @@ async function loadComments(
   setStatus(controller);
 }
 
-async function refreshCurrentClip(controller) {
+function refreshCurrentClip(controller, { queueIfBusy = false } = {}) {
+  if (controller.closed) return Promise.resolve();
+  if (controller.refreshPromise) {
+    if (queueIfBusy) controller.refreshQueued = true;
+    return controller.refreshPromise;
+  }
+  if (controller.baseLoadPromise) {
+    if (queueIfBusy && !controller.refreshAfterBase) {
+      controller.refreshAfterBase = true;
+      const activeLoad = controller.baseLoadPromise;
+      const refreshAfterLoad = () => {
+        if (!controller.refreshAfterBase) return;
+        controller.refreshAfterBase = false;
+        if (!controller.closed) void refreshCurrentClip(controller);
+      };
+      activeLoad.then(refreshAfterLoad, refreshAfterLoad);
+    }
+    return controller.baseLoadPromise;
+  }
+
+  controller.refreshingContext = true;
+  updateSubmitState(controller);
+  const refreshPromise = performRefreshCurrentClip(controller);
+  controller.refreshPromise = refreshPromise;
+  const finishRefresh = () => {
+    if (controller.refreshPromise !== refreshPromise) return;
+    controller.refreshPromise = null;
+    controller.refreshingContext = false;
+    if (controller.closed) return;
+    updateSubmitState(controller);
+    if (controller.refreshQueued) {
+      controller.refreshQueued = false;
+      void refreshCurrentClip(controller);
+    }
+  };
+  refreshPromise.then(finishRefresh, finishRefresh);
+  return refreshPromise;
+}
+
+async function performRefreshCurrentClip(controller) {
   if (controller.closed) return;
   const previousClipId = controller.clipId;
   const contextVersion = ++controller.contextVersion;
@@ -661,7 +785,8 @@ function showPostError(controller, result) {
 
 async function postComment(controller) {
   if (controller.closed || controller.posting || !controller.composeAvailable) return;
-  const body = controller.textarea.value.trim();
+  const submittedValue = controller.textarea.value;
+  const body = submittedValue.trim();
   if (!body) {
     updateSubmitState(controller);
     return;
@@ -710,13 +835,32 @@ async function postComment(controller) {
 
     if (controller.closed || controller.contextVersion !== contextVersion) return;
 
+    if (isAmbiguousPostFailure(result?.reason)) {
+      setStatus(
+        controller,
+        '投稿結果を確認できなかったため、一覧を更新しています…',
+        'error'
+      );
+      await loadComments(controller);
+      if (!controller.closed && controller.contextVersion === contextVersion) {
+        setStatus(
+          controller,
+          '投稿結果を確認できませんでした。一覧を確認してから、必要な場合だけ再投稿してください。入力内容は保持されています。',
+          'error'
+        );
+      }
+      return;
+    }
+
     if (!result?.ok || !result.comment || typeof result.comment !== 'object') {
       showPostError(controller, result);
       return;
     }
 
     controller.comments = mergeComments([result.comment], controller.comments);
-    controller.textarea.value = '';
+    if (shouldClearSubmittedDraft(controller.textarea.value, submittedValue)) {
+      controller.textarea.value = '';
+    }
     renderComments(controller);
     setActions(controller);
     setStatus(controller, 'コメントを投稿しました。', 'success');
@@ -733,7 +877,14 @@ async function postComment(controller) {
  * 一覧から消えるだけなので、追記マージのままでは削除済みが残り続ける。
  */
 function reloadComments(controller) {
-  if (controller.closed || controller.posting) return;
+  if (
+    controller.closed ||
+    controller.posting ||
+    controller.loadingBase ||
+    controller.refreshingContext
+  ) {
+    return;
+  }
 
   if (controller.clipId === null) {
     void refreshCurrentClip(controller);
@@ -749,7 +900,7 @@ function scheduleStorageRefresh(controller) {
   queueMicrotask(() => {
     controller.refreshScheduled = false;
     if (!controller.closed) {
-      void refreshCurrentClip(controller);
+      void refreshCurrentClip(controller, { queueIfBusy: true });
     }
   });
 }
@@ -760,7 +911,9 @@ function addStorageListener(controller) {
 
   controller.storageListener = (changes, areaName) => {
     if (areaName !== 'local') return;
-    if (Object.keys(changes).some((key) => WATCHED_STORAGE_KEYS.has(key))) {
+    if (
+      Object.keys(changes).some((key) => WATCHED_AUTH_STORAGE_KEYS.has(key))
+    ) {
       scheduleStorageRefresh(controller);
     }
   };
@@ -771,6 +924,25 @@ function removeStorageListener(controller) {
   if (!controller.storageListener) return;
   globalThis.chrome?.storage?.onChanged?.removeListener?.(controller.storageListener);
   controller.storageListener = null;
+}
+
+function addPlaybackContextListener(controller) {
+  controller.playbackContextListener = () => {
+    scheduleStorageRefresh(controller);
+  };
+  window.addEventListener(
+    PLAYBACK_CONTEXT_CHANGED_EVENT,
+    controller.playbackContextListener
+  );
+}
+
+function removePlaybackContextListener(controller) {
+  if (!controller.playbackContextListener) return;
+  window.removeEventListener(
+    PLAYBACK_CONTEXT_CHANGED_EVENT,
+    controller.playbackContextListener
+  );
+  controller.playbackContextListener = null;
 }
 
 // サイトのタブでコメントを消して戻ってきたときに、削除済みを表示したままにしない。
@@ -789,12 +961,99 @@ function removeVisibilityListener(controller) {
   controller.visibilityListener = null;
 }
 
+function dispatchPanelOpenState(open) {
+  if (!window?.dispatchEvent) return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent(COMMENT_PANEL_OPEN_STATE_EVENT, {
+        detail: { open },
+      })
+    );
+  } catch {
+    // The direct callback and aria state still work on restricted pages.
+  }
+}
+
 function notifyOpenState(controller, open) {
+  for (const trigger of document.querySelectorAll(
+    `[aria-controls="${COMMENT_PANEL_ID}"]`
+  )) {
+    trigger.setAttribute('aria-expanded', String(open));
+  }
   try {
     controller.onOpenChange?.(open);
   } catch (error) {
     console.warn('[extension-comments] onOpenChange failed', error);
   }
+  dispatchPanelOpenState(open);
+}
+
+function eventBelongsToPanel(event, controller) {
+  if (event.target === controller.host) return true;
+  try {
+    if (event.composedPath?.().includes(controller.host)) return true;
+    return controller.host.contains(event.target);
+  } catch {
+    return false;
+  }
+}
+
+function addKeyGuard(controller) {
+  controller.keyGuard = (event) => {
+    if (controller.closed || !eventBelongsToPanel(event, controller)) return;
+    // Capture on window before the event reaches document/player shortcuts.
+    event.stopImmediatePropagation();
+    if (event.type === 'keydown' && event.key === 'Escape') {
+      event.preventDefault();
+      closeController(controller);
+    }
+  };
+  for (const eventName of ['keydown', 'keyup', 'keypress']) {
+    window.addEventListener(eventName, controller.keyGuard, true);
+  }
+}
+
+function removeKeyGuard(controller) {
+  if (!controller.keyGuard) return;
+  for (const eventName of ['keydown', 'keyup', 'keypress']) {
+    window.removeEventListener(eventName, controller.keyGuard, true);
+  }
+  controller.keyGuard = null;
+}
+
+function addDetachedMountObserver(controller) {
+  if (typeof MutationObserver !== 'function' || !document.documentElement) return;
+  controller.mountObserver = new MutationObserver(() => {
+    if (!controller.host.isConnected) {
+      closeController(controller, { restoreFocus: false });
+    }
+  });
+  controller.mountObserver.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+}
+
+function removeDetachedMountObserver(controller) {
+  controller.mountObserver?.disconnect();
+  controller.mountObserver = null;
+}
+
+function addCloseRequestListener(controller) {
+  controller.closeRequestListener = () => closeController(controller);
+  window.addEventListener(
+    CLOSE_COMMENT_PANEL_EVENT,
+    controller.closeRequestListener
+  );
+}
+
+function removeCloseRequestListener(controller) {
+  if (!controller.closeRequestListener) return;
+  window.removeEventListener(
+    CLOSE_COMMENT_PANEL_EVENT,
+    controller.closeRequestListener
+  );
+  controller.closeRequestListener = null;
 }
 
 function closeController(controller, { restoreFocus = true } = {}) {
@@ -803,7 +1062,11 @@ function closeController(controller, { restoreFocus = true } = {}) {
   controller.contextVersion += 1;
   controller.requestVersion += 1;
   removeStorageListener(controller);
+  removePlaybackContextListener(controller);
   removeVisibilityListener(controller);
+  removeKeyGuard(controller);
+  removeDetachedMountObserver(controller);
+  removeCloseRequestListener(controller);
   window.removeEventListener('beforeunload', controller.beforeUnload);
   controller.host.remove();
   if (activePanel === controller) {
@@ -811,8 +1074,11 @@ function closeController(controller, { restoreFocus = true } = {}) {
   }
   notifyOpenState(controller, false);
 
-  if (restoreFocus && controller.triggerEl?.isConnected) {
-    controller.triggerEl.focus?.();
+  if (restoreFocus) {
+    const focusTarget = controller.triggerEl?.isConnected
+      ? controller.triggerEl
+      : document.querySelector(`[aria-controls="${COMMENT_PANEL_ID}"]`);
+    focusTarget?.focus?.();
   }
 }
 
@@ -893,14 +1159,22 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   const textarea = createElement('textarea');
   textarea.id = textareaId;
   textarea.className = 'textarea';
+  textarea.slot = 'comment-composer';
   textarea.maxLength = COMMENT_BODY_MAX_LENGTH;
   textarea.rows = 3;
   textarea.placeholder = 'コメントを入力（500文字まで）';
+  textarea.setAttribute('aria-label', 'コメントを入力');
+  // Keep the editable control in the light DOM and render it through a slot.
+  // Streaming sites then see a real textarea target and can apply their normal
+  // shortcut exclusion even though the rest of the panel remains isolated.
+  const textareaSlot = createElement('slot');
+  textareaSlot.name = textarea.slot;
+  label.addEventListener('click', () => textarea.focus());
   const submitButton = createElement('button', '投稿');
   submitButton.type = 'submit';
   submitButton.className = 'submit';
   submitButton.disabled = true;
-  form.append(label, textarea, submitButton);
+  form.append(label, textareaSlot, submitButton);
 
   const actions = createElement('div');
   actions.className = 'actions';
@@ -909,6 +1183,7 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   status.setAttribute('aria-live', 'polite');
 
   panel.append(header, commentsList, pagination, form, actions, status);
+  host.appendChild(textarea);
   shadowRoot.append(style, panel);
   mountEl.appendChild(host);
 
@@ -931,14 +1206,25 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
     hasNext: false,
     nextCursor: null,
     composeAvailable: false,
+    loadingBase: false,
     loadingMore: false,
     posting: false,
+    openingLogin: false,
     closed: false,
     contextVersion: 0,
     requestVersion: 0,
+    baseLoadPromise: null,
+    refreshingContext: false,
+    refreshPromise: null,
+    refreshQueued: false,
+    refreshAfterBase: false,
     refreshScheduled: false,
     storageListener: null,
+    playbackContextListener: null,
     visibilityListener: null,
+    keyGuard: null,
+    mountObserver: null,
+    closeRequestListener: null,
     beforeUnload: null,
   };
 
@@ -977,7 +1263,11 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   controller.beforeUnload = () => closeController(controller, { restoreFocus: false });
   window.addEventListener('beforeunload', controller.beforeUnload, { once: true });
   addStorageListener(controller);
+  addPlaybackContextListener(controller);
   addVisibilityListener(controller);
+  addKeyGuard(controller);
+  addDetachedMountObserver(controller);
+  addCloseRequestListener(controller);
   return controller;
 }
 
@@ -988,6 +1278,8 @@ export function toggleCommentPanel({
 } = {}) {
   pruneDetachedPanel();
   if (activePanel) {
+    if (triggerEl?.isConnected) activePanel.triggerEl = triggerEl;
+    if (onOpenChange) activePanel.onOpenChange = onOpenChange;
     closeController(activePanel);
     return false;
   }
@@ -997,6 +1289,7 @@ export function toggleCommentPanel({
     return false;
   }
 
+  closeMemoSidebar();
   activePanel = createPanel({ mountEl, triggerEl, onOpenChange });
   notifyOpenState(activePanel, true);
   void refreshCurrentClip(activePanel);

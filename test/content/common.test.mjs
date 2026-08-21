@@ -25,6 +25,11 @@ class FakeEventTarget {
       listener(event);
     }
   }
+
+  dispatchEvent(event) {
+    this.dispatch(event);
+    return true;
+  }
 }
 
 class FakeElement extends FakeEventTarget {
@@ -39,6 +44,8 @@ class FakeElement extends FakeEventTarget {
       transition: '',
       width: '',
     };
+    this.dataset = {};
+    this.className = '';
     this.id = '';
     this.textContent = '';
     this.value = '';
@@ -99,8 +106,22 @@ class FakeDocument extends FakeEventTarget {
     return visit(this.body);
   }
 
-  querySelector() {
-    return null;
+  querySelector(selector) {
+    const visit = (element) => {
+      if (
+        selector.startsWith('.') &&
+        element.className.split(/\s+/).includes(selector.slice(1))
+      ) {
+        return element;
+      }
+      if (selector === element.tagName.toLowerCase()) return element;
+      for (const child of element.children) {
+        const match = visit(child);
+        if (match) return match;
+      }
+      return null;
+    };
+    return visit(this.body);
   }
 }
 
@@ -113,10 +134,15 @@ function createKeyboardEvent(target) {
     repeat: false,
     defaultPrevented: false,
     propagationStopped: false,
+    immediatePropagationStopped: false,
     preventDefault() {
       this.defaultPrevented = true;
     },
     stopPropagation() {
+      this.propagationStopped = true;
+    },
+    stopImmediatePropagation() {
+      this.immediatePropagationStopped = true;
       this.propagationStopped = true;
     },
   };
@@ -253,4 +279,96 @@ test('Enter submits only from the name input', async () => {
 
   assert.equal(saveCount, 1);
   assert.equal(inputEnter.defaultPrevented, true);
+  assert.equal(inputEnter.immediatePropagationStopped, true);
+});
+
+test('closeMemoSidebar fully tears down the active session', async () => {
+  const { document, window } = installDom();
+  const { closeMemoSidebar, MEMO_SIDEBAR_ID, openMemoSidebar } =
+    await loadCommonModule();
+  const player = document.createElement('video');
+  player.style.width = '70%';
+  let closeCount = 0;
+
+  openMemoSidebar({
+    videoPlayer: player,
+    onClose: () => {
+      closeCount += 1;
+    },
+  });
+
+  assert.equal(player.style.width, 'calc(100% - 20%)');
+  assert.equal(window.listeners.get('keydown')?.size, 1);
+  assert.equal(document.listeners.get('focusin')?.size, 1);
+
+  assert.equal(closeMemoSidebar(), true);
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+  assert.equal(player.style.width, '70%');
+  assert.equal(window.listeners.get('keydown')?.size, 0);
+  assert.equal(document.listeners.get('focusin')?.size, 0);
+  assert.equal(closeCount, 1);
+  assert.equal(closeMemoSidebar(), false);
+});
+
+test('superseding a memo session does not call its close callback', async () => {
+  const { document } = installDom();
+  const { closeMemoSidebar, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  let firstCloseCount = 0;
+
+  openMemoSidebar({
+    videoPlayer: player,
+    onClose: () => {
+      firstCloseCount += 1;
+    },
+  });
+  openMemoSidebar({ videoPlayer: player });
+
+  assert.equal(firstCloseCount, 0);
+  closeMemoSidebar();
+});
+
+test('opening a memo requests that the comment panel close', async () => {
+  const { document, window } = installDom();
+  const {
+    CLOSE_COMMENT_PANEL_EVENT,
+    closeMemoSidebar,
+    openMemoSidebar,
+  } = await loadCommonModule();
+  const player = document.createElement('video');
+  let closeRequestCount = 0;
+  window.addEventListener(CLOSE_COMMENT_PANEL_EVENT, () => {
+    closeRequestCount += 1;
+  });
+
+  openMemoSidebar({ videoPlayer: player });
+
+  assert.equal(closeRequestCount, 1);
+  closeMemoSidebar();
+});
+
+test('opening a memo after the Netflix clip list preserves the true player width', async () => {
+  const { document } = installDom();
+  const { closeMemoSidebar, MEMO_SIDEBAR_ID, openMemoSidebar } =
+    await loadCommonModule();
+  const player = document.createElement('div');
+  player.className = 'watch-video--player-view';
+  player.style.width = '65%';
+  document.body.appendChild(player);
+
+  const clipList = document.createElement('div');
+  clipList.id = MEMO_SIDEBAR_ID;
+  clipList.dataset.sidebarType = 'clip-list';
+  clipList.dataset.originalPlayerWidth = player.style.width;
+  document.body.appendChild(clipList);
+  player.style.width = 'calc(100% - 30%)';
+
+  const memo = openMemoSidebar({ videoPlayer: player });
+
+  assert.notEqual(memo, null);
+  assert.equal(clipList.parentElement, null);
+  assert.equal(player.style.width, 'calc(100% - 20%)');
+
+  closeMemoSidebar();
+  assert.equal(player.style.width, '65%');
 });

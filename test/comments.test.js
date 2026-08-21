@@ -3,10 +3,99 @@ import { test } from 'node:test';
 
 import {
   buildCommentsApiUrl,
+  fetchClipComments,
   getCommentsResponseReason,
+  isValidCommentsSuccessResponse,
+  postClipComment,
   validateFetchClipCommentsInput,
   validatePostClipCommentInput,
 } from '../src/background/comments.js';
+import { saveExtensionAuthTokenInBackground } from '../src/background/authState.js';
+import { runExclusive } from '../src/background/sync.js';
+
+function commentFixture(clipId = 1, overrides = {}) {
+  return {
+    id: 10,
+    clipId,
+    userId: 7,
+    username: 'alice',
+    body: 'hello',
+    createdAt: '2026-07-18T09:30:00.000Z',
+    ...overrides,
+  };
+}
+
+function getResponseFixture(clipId = 1, overrides = {}) {
+  return {
+    ok: true,
+    clipId,
+    comments: [commentFixture(clipId)],
+    hasNext: false,
+    nextCursor: null,
+    ...overrides,
+  };
+}
+
+function postResponseFixture(clipId = 1, overrides = {}) {
+  return {
+    ok: true,
+    comment: commentFixture(clipId),
+    ...overrides,
+  };
+}
+
+function jsonResponse(status, data) {
+  return {
+    status,
+    json: async () => data,
+  };
+}
+
+async function withCommentRequestMocks({ state, fetchImpl }, task) {
+  const originalChrome = globalThis.chrome;
+  const originalFetch = globalThis.fetch;
+
+  globalThis.chrome = {
+    runtime: { lastError: null },
+    storage: {
+      local: {
+        get(keys, callback) {
+          const keyList = Array.isArray(keys) ? keys : [keys];
+          callback(Object.fromEntries(
+            keyList
+              .filter((key) => Object.hasOwn(state, key))
+              .map((key) => [key, state[key]])
+          ));
+        },
+        remove(keys, callback) {
+          const keyList = Array.isArray(keys) ? keys : [keys];
+          for (const key of keyList) delete state[key];
+          callback();
+        },
+        set(items, callback) {
+          Object.assign(state, items);
+          callback();
+        },
+      },
+    },
+  };
+  globalThis.fetch = fetchImpl;
+
+  try {
+    await task();
+  } finally {
+    if (originalChrome === undefined) {
+      delete globalThis.chrome;
+    } else {
+      globalThis.chrome = originalChrome;
+    }
+    if (originalFetch === undefined) {
+      delete globalThis.fetch;
+    } else {
+      globalThis.fetch = originalFetch;
+    }
+  }
+}
 
 test('コメント一覧入力を正規化し、limit の既定値を設定する', () => {
   assert.deepEqual(validateFetchClipCommentsInput({ clipId: ' 42 ' }), {
@@ -97,4 +186,338 @@ test('HTTP statusをコメントUI向けreasonへ変換する', () => {
   assert.equal(getCommentsResponseReason(403), 'forbidden');
   assert.equal(getCommentsResponseReason(404), 'not_found');
   assert.equal(getCommentsResponseReason(500), 'request_failed');
+});
+
+test('successful GET and POST responses require their expected JSON shape', () => {
+  assert.equal(isValidCommentsSuccessResponse(
+    'GET',
+    getResponseFixture(1),
+    1
+  ), true);
+  assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
+    comments: [
+      commentFixture(1, { id: 11 }),
+      commentFixture(1, { id: 10, username: null }),
+    ],
+    hasNext: true,
+    nextCursor: 10,
+  }), 1), true);
+  assert.equal(isValidCommentsSuccessResponse(
+    'POST',
+    postResponseFixture(1),
+    1
+  ), true);
+
+  assert.equal(isValidCommentsSuccessResponse('GET', {}, 1), false);
+  assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
+    ok: false,
+  }), 1), false);
+  assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(2), 1), false);
+  assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
+    hasNext: true,
+    nextCursor: null,
+  }), 1), false);
+  assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
+    nextCursor: 10,
+  }), 1), false);
+  assert.equal(isValidCommentsSuccessResponse('POST', { ok: true, comment: {} }, 1), false);
+  assert.equal(isValidCommentsSuccessResponse('POST', null, 1), false);
+});
+
+test('comment responses require every field in the API contract', () => {
+  const invalidOverrides = [
+    { id: undefined },
+    { clipId: undefined },
+    { clipId: 2 },
+    { userId: undefined },
+    { username: undefined },
+    { body: undefined },
+    { body: '' },
+    { body: '   ' },
+    { body: 'a'.repeat(501) },
+    { createdAt: undefined },
+    { createdAt: 'not-a-date' },
+    { createdAt: '01/02/2026' },
+  ];
+
+  for (const override of invalidOverrides) {
+    assert.equal(isValidCommentsSuccessResponse('POST', postResponseFixture(1, {
+      comment: commentFixture(1, override),
+    }), 1), false, JSON.stringify(override));
+  }
+});
+
+test('malformed success JSON is returned as invalid_response', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'token',
+  };
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => jsonResponse(200, {}),
+  }, async () => {
+    assert.deepEqual(await fetchClipComments({ clipId: 1 }), {
+      ok: false,
+      reason: 'invalid_response',
+      status: 200,
+    });
+  });
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => jsonResponse(201, { comment: {} }),
+  }, async () => {
+    assert.deepEqual(await postClipComment({ clipId: 1, body: 'hello' }), {
+      ok: false,
+      reason: 'invalid_response',
+      status: 201,
+    });
+  });
+});
+
+test('GET accepts only 200 and POST accepts only 201', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'token',
+  };
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => jsonResponse(201, getResponseFixture(1)),
+  }, async () => {
+    assert.deepEqual(await fetchClipComments({ clipId: 1 }), {
+      ok: false,
+      reason: 'request_failed',
+      status: 201,
+    });
+  });
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => jsonResponse(200, postResponseFixture(1)),
+  }, async () => {
+    assert.deepEqual(await postClipComment({ clipId: 1, body: 'hello' }), {
+      ok: false,
+      reason: 'request_failed',
+      status: 200,
+    });
+  });
+});
+
+test('a stale 401 does not clear a newly stored auth token', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'old-token',
+    extensionTokenExpiresAt: '2099-01-01T00:00:00.000Z',
+    extensionLinked: true,
+  };
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => {
+      state.extensionAuthToken = 'new-token';
+      return jsonResponse(401, { message: 'expired' });
+    },
+  }, async () => {
+    const result = await fetchClipComments({ clipId: 1 });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'stale_unauthorized');
+    assert.equal(result.message, 'expired');
+  });
+
+  assert.equal(state.extensionAuthToken, 'new-token');
+  assert.equal(state.extensionLinked, true);
+  assert.equal(state.extensionTokenExpiresAt, '2099-01-01T00:00:00.000Z');
+});
+
+test('a 401 for the current token clears auth state', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'current-token',
+    extensionTokenExpiresAt: '2099-01-01T00:00:00.000Z',
+    extensionTokenRefreshBackoff: { failureCount: 1 },
+    extensionLinked: true,
+  };
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => jsonResponse(401, null),
+  }, async () => {
+    const result = await fetchClipComments({ clipId: 1 });
+    assert.equal(result.reason, 'unauthorized');
+  });
+
+  assert.equal(Object.hasOwn(state, 'extensionAuthToken'), false);
+  assert.equal(Object.hasOwn(state, 'extensionTokenExpiresAt'), false);
+  assert.equal(Object.hasOwn(state, 'extensionTokenRefreshBackoff'), false);
+  assert.equal(state.extensionLinked, false);
+});
+
+test('a re-link queued during an old-token 401 is saved after the clear', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'old-token',
+    extensionLinked: true,
+  };
+  let resolveFetch;
+  let markFetchStarted;
+  const fetchStarted = new Promise((resolve) => {
+    markFetchStarted = resolve;
+  });
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => {
+      markFetchStarted();
+      return new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+    },
+  }, async () => {
+    const commentsPromise = fetchClipComments({ clipId: 1 });
+    await fetchStarted;
+
+    const savePromise = saveExtensionAuthTokenInBackground({
+      extensionInstanceId: 'instance-id',
+      extensionAuthToken: 'new-token',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    });
+    await Promise.resolve();
+    assert.equal(state.extensionAuthToken, 'old-token');
+
+    resolveFetch(jsonResponse(401, { message: 'expired' }));
+    const [commentsResult, saveResult] = await Promise.all([
+      commentsPromise,
+      savePromise,
+    ]);
+    assert.equal(commentsResult.reason, 'unauthorized');
+    assert.deepEqual(saveResult, { ok: true });
+  });
+
+  assert.equal(state.extensionAuthToken, 'new-token');
+  assert.equal(state.extensionLinked, true);
+  assert.equal(state.extensionTokenExpiresAt, '2099-01-01T00:00:00.000Z');
+});
+
+test('a re-link queued first is visible to the following comments request', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'old-token',
+    extensionLinked: true,
+  };
+  let authorization;
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async (_url, options) => {
+      authorization = options.headers.Authorization;
+      return jsonResponse(401, null);
+    },
+  }, async () => {
+    const savePromise = saveExtensionAuthTokenInBackground({
+      extensionInstanceId: 'instance-id',
+      extensionAuthToken: 'new-token',
+    });
+    const commentsPromise = fetchClipComments({ clipId: 1 });
+    const [saveResult, commentsResult] = await Promise.all([
+      savePromise,
+      commentsPromise,
+    ]);
+    assert.deepEqual(saveResult, { ok: true });
+    assert.equal(commentsResult.reason, 'unauthorized');
+  });
+
+  assert.equal(authorization, 'Bearer new-token');
+  assert.equal(Object.hasOwn(state, 'extensionAuthToken'), false);
+  assert.equal(state.extensionLinked, false);
+});
+
+test('a stalled comments request is aborted and returned as timeout', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'token',
+  };
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalWarn = console.warn;
+
+  globalThis.setTimeout = (callback) => {
+    queueMicrotask(callback);
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+  console.warn = () => {};
+
+  try {
+    await withCommentRequestMocks({
+      state,
+      fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+        const rejectAsAborted = () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        };
+        if (options.signal.aborted) {
+          rejectAsAborted();
+        } else {
+          options.signal.addEventListener('abort', rejectAsAborted, { once: true });
+        }
+      }),
+    }, async () => {
+      assert.deepEqual(await fetchClipComments({ clipId: 1 }), {
+        ok: false,
+        reason: 'timeout',
+      });
+    });
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+    console.warn = originalWarn;
+  }
+});
+
+test('the comments deadline includes time waiting for the exclusive queue', async () => {
+  const state = {
+    extensionInstanceId: 'instance-id',
+    extensionAuthToken: 'token',
+  };
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  let releaseBlocker;
+  const blocker = runExclusive(() => new Promise((resolve) => {
+    releaseBlocker = resolve;
+  }));
+  let fetchCalls = 0;
+
+  globalThis.setTimeout = (callback) => {
+    queueMicrotask(callback);
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  try {
+    await withCommentRequestMocks({
+      state,
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return jsonResponse(200, getResponseFixture(1));
+      },
+    }, async () => {
+      assert.deepEqual(await fetchClipComments({ clipId: 1 }), {
+        ok: false,
+        reason: 'timeout',
+      });
+      assert.equal(fetchCalls, 0);
+
+      releaseBlocker();
+      await blocker;
+      await Promise.resolve();
+      assert.equal(fetchCalls, 0);
+    });
+  } finally {
+    releaseBlocker?.();
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 });

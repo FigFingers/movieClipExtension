@@ -2,9 +2,7 @@ import {
   STORAGE_KEYS,
   storageGet,
   storageSet,
-  storageRemove,
   normalizePendingClips,
-  clearExtensionAuthState,
 } from './../shared/storage.js';
 
 // このモジュールは content script 専用。サイト API への fetch(同期・トークンリフレッシュ)は
@@ -97,34 +95,13 @@ export async function getExtensionConnectionState() {
 }
 
 export async function saveExtensionAuthToken(extensionInstanceId, extensionAuthToken, expiresAt) {
-  const currentInstanceId = await getOrCreateExtensionInstanceId();
-  if (extensionInstanceId !== currentInstanceId) {
-    console.warn('[extension-sync] ignored auth token for mismatched extensionInstanceId', {
-      expected: currentInstanceId,
-      received: extensionInstanceId,
-    });
-    return false;
-  }
-
-  if (!extensionAuthToken || typeof extensionAuthToken !== 'string') {
-    console.warn('[extension-sync] ignored empty auth token');
-    return false;
-  }
-
-  // expiresAt はサーバ発行の ISO 文字列。欠落時(旧サイト)でもトークン自体は保存し、
-  // background のリフレッシュが期限付きトークンへ移行させる。
-  const expiresAtMs = Date.parse(expiresAt || '');
-  await storageSet({
-    [STORAGE_KEYS.extensionAuthToken]: extensionAuthToken,
-    [STORAGE_KEYS.extensionTokenExpiresAt]: Number.isFinite(expiresAtMs)
-      ? new Date(expiresAtMs).toISOString()
-      : null,
-    [STORAGE_KEYS.extensionLinked]: true,
+  const result = await sendRuntimeMessage({
+    type: 'SAVE_EXTENSION_AUTH_TOKEN',
+    extensionInstanceId,
+    extensionAuthToken,
+    expiresAt,
   });
-  // 新しいトークンを受けた時点で旧トークン時代の失敗回数は無効。抑制を持ち越すと
-  // 再連携直後のリフレッシュが不要に待たされる。
-  await storageRemove([STORAGE_KEYS.extensionTokenRefreshBackoff]);
-  return true;
+  return Boolean(result?.ok);
 }
 
 export function toExtensionClipPayload(clip) {
@@ -203,17 +180,8 @@ export async function handleExtensionLinkWithAuthToken(message) {
 }
 
 export async function handleExtensionUnlinked(message) {
-  // 未連携時に unlink を受けても instanceId を新規発行しないよう、保存済みの値だけ読む。
-  const currentInstanceId = await getExtensionInstanceId();
-  if (!currentInstanceId || message?.extensionInstanceId !== currentInstanceId) {
-    console.warn('[extension-sync] ignored unlink for mismatched extensionInstanceId', {
-      expected: currentInstanceId,
-      received: message?.extensionInstanceId,
-    });
-    return { ok: false };
-  }
-
-  await clearExtensionAuthState();
-  console.log('[extension-sync] cleared auth state after unlink');
-  return { ok: true };
+  return sendRuntimeMessage({
+    type: 'UNLINK_EXTENSION',
+    extensionInstanceId: message?.extensionInstanceId,
+  });
 }

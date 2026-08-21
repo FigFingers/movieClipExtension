@@ -6,6 +6,7 @@ import {
   normalizePendingClips,
   clearExtensionAuthState,
 } from './../shared/storage.js';
+import { fetchJsonWithTimeout } from './request.js';
 
 // 同期 fetch は background(service worker)で実行する。content script の fetch は
 // ページオリジン(netflix.com 等)の CORS に従いサイト API に 403 で弾かれるが、
@@ -52,12 +53,6 @@ function toExtensionSyncItem(clip) {
   };
 }
 
-function parseResponseJson(response) {
-  return response
-    .json()
-    .catch(() => null);
-}
-
 function collectClientItemIds(value, ids = new Set()) {
   if (!value || typeof value !== 'object') return ids;
 
@@ -91,26 +86,46 @@ async function removePendingClipIds(clientItemIds) {
   });
 }
 
-export async function openLoginTab({ force = false } = {}) {
+async function performOpenLoginTab({ force = false } = {}) {
   if (!force) {
     const stored = await storageGet([LOGIN_PROMPT_STORAGE_KEY]);
     const lastOpenedAt = Number(stored[LOGIN_PROMPT_STORAGE_KEY]) || 0;
     if (Date.now() - lastOpenedAt < LOGIN_PROMPT_COOLDOWN_MS) {
-      return { ok: false, reason: 'cooldown' };
+      return { ok: true, skipped: true, reason: 'cooldown' };
     }
   }
 
-  await storageSet({ [LOGIN_PROMPT_STORAGE_KEY]: Date.now() });
-
-  return new Promise((resolve) => {
+  const result = await new Promise((resolve) => {
     chrome.tabs.create({ url: getSiteUrl('/login') }, (tab) => {
       if (chrome.runtime.lastError) {
-        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        resolve({
+          ok: false,
+          reason: 'tab_create_failed',
+          error: chrome.runtime.lastError.message,
+        });
         return;
       }
       resolve({ ok: true, tabId: tab?.id });
     });
   });
+
+  // A failed tabs.create must remain immediately retryable. Record cooldown
+  // only after Chrome confirms that a login tab was actually opened.
+  if (result.ok) {
+    await storageSet({ [LOGIN_PROMPT_STORAGE_KEY]: Date.now() });
+  }
+  return result;
+}
+
+let loginTabInFlight = null;
+export function openLoginTab(options = {}) {
+  if (!loginTabInFlight) {
+    loginTabInFlight = performOpenLoginTab(options)
+      .finally(() => {
+        loginTabInFlight = null;
+      });
+  }
+  return loginTabInFlight;
 }
 
 async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {}) {
@@ -145,30 +160,31 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
     hasToken: true,
   });
 
-  let response;
-  let data = null;
+  const request = await fetchJsonWithTimeout(getApiEndpoint('extension/sync'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${extensionAuthToken}`,
+    },
+    body: JSON.stringify({
+      extensionInstanceId,
+      items: pendingClips.map(toExtensionSyncItem),
+    }),
+  });
 
-  try {
-    response = await fetch(getApiEndpoint('extension/sync'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${extensionAuthToken}`,
-      },
-      body: JSON.stringify({
-        extensionInstanceId,
-        items: pendingClips.map(toExtensionSyncItem),
-      }),
-    });
-
-    data = await parseResponseJson(response);
-  } catch (error) {
+  if (!request.ok) {
     console.warn('[extension-sync] network error; keeping clips queued', {
       clipCount: pendingClips.length,
-      message: error?.message,
+      message: request.error?.message,
+      timedOut: request.timedOut,
     });
-    return { ok: false, queued: true, reason: 'network_error' };
+    return {
+      ok: false,
+      queued: true,
+      reason: request.timedOut ? 'timeout' : 'network_error',
+    };
   }
+  const { response, data } = request;
 
   console.log('[extension-sync] sync result', {
     status: response.status,

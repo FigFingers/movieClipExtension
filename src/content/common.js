@@ -5,10 +5,37 @@ import {
 
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
 export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
+export const CLOSE_COMMENT_PANEL_EVENT = 'ext:close-comment-panel';
 
 // 表示中サイドバーの状態。再オープン時に元のプレイヤー幅を引き継ぎつつ、
 // 前インスタンスのリスナーを確実に外すためモジュールスコープで保持する。
 let activeMemoSession = null;
+
+export function requestCloseCommentPanel() {
+  if (typeof window.dispatchEvent !== 'function') return;
+  const EventConstructor = globalThis.CustomEvent || globalThis.Event;
+  if (typeof EventConstructor !== 'function') return;
+  window.dispatchEvent(new EventConstructor(CLOSE_COMMENT_PANEL_EVENT));
+}
+
+export function closeMemoSidebar() {
+  const session = activeMemoSession;
+  if (session) {
+    session.close();
+    return true;
+  }
+
+  const sidebar = document.getElementById(MEMO_SIDEBAR_ID);
+  if (!sidebar) return false;
+
+  const originalWidth = sidebar.dataset?.originalPlayerWidth;
+  sidebar.remove();
+  const player =
+    document.querySelector('.watch-video--player-view') ||
+    document.querySelector('video')?.parentElement;
+  if (player) player.style.width = originalWidth || '100%';
+  return true;
+}
 
 export function detectService(host = window.location.hostname) {
   if (host.includes('netflix.com')) return 'Netflix';
@@ -88,20 +115,23 @@ export function openMemoSidebar({
     document.querySelector('video')?.parentElement;
   if (!player) return null;
 
+  requestCloseCommentPanel();
+
   // 直前のサイドバーが残っている場合は旧セッションを無効化する。同じプレイヤーなら
   // 最初に開く前の幅を引き継ぎ、別プレイヤーなら旧プレイヤーの幅をここで復元する。
   const previousSession = activeMemoSession;
-  let originalWidth = player.style.width;
+  if (!previousSession) {
+    // Netflix のクリップ一覧など、メモ以外が同じ領域を使っている場合は、
+    // そのサイドバーが保存した元幅へ戻してからメモ側の originalWidth を取得する。
+    closeMemoSidebar();
+  }
+  const originalWidth =
+    previousSession?.player === player
+      ? previousSession.originalWidth
+      : player.style.width;
   if (previousSession) {
     previousSession.supersede();
-    previousSession.teardown();
-    previousSession.sidebar.remove();
-    if (previousSession.player === player) {
-      originalWidth = previousSession.originalWidth;
-    } else {
-      previousSession.player.style.width = previousSession.originalWidth || '100%';
-    }
-    activeMemoSession = null;
+    previousSession.close({ notify: false });
   }
   document.getElementById(MEMO_SIDEBAR_ID)?.remove();
 
@@ -128,7 +158,7 @@ export function openMemoSidebar({
   const closeBtn = document.createElement('button');
   closeBtn.textContent = '×';
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
-  const closeSidebar = () => {
+  const closeSidebar = ({ notify = true } = {}) => {
     if (closed) return;
     closed = true;
     removeKeyGuard?.();
@@ -138,7 +168,7 @@ export function openMemoSidebar({
       player.style.width = originalWidth || '100%';
     }
     sb.remove();
-    onClose?.();
+    if (notify) onClose?.();
   };
   closeBtn.onclick = closeSidebar;
   header.append(title, closeBtn);
@@ -215,7 +245,11 @@ export function openMemoSidebar({
       e.preventDefault();
       submit();
     }
-    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === 'function') {
+      e.stopImmediatePropagation();
+    } else {
+      e.stopPropagation();
+    }
   };
   const keyTypes = ['keydown', 'keyup', 'keypress'];
   for (const type of keyTypes) {
@@ -258,6 +292,7 @@ export function openMemoSidebar({
     player,
     originalWidth,
     teardown: removeKeyGuard,
+    close: closeSidebar,
     supersede: () => {
       superseded = true;
     },

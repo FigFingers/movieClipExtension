@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { resolveCurrentClipIdFromState } from '../src/content/commentPanel.js';
+import {
+  isAmbiguousPostFailure,
+  resolveCurrentClipIdFromState,
+  shouldClearSubmittedDraft,
+} from '../src/content/commentPanel.js';
 
 test('単体再生は clipId を id より優先する', () => {
   assert.equal(
@@ -125,4 +129,23 @@ test('再生モードが無い通常視聴では null にする', () => {
     }),
     null
   );
+});
+
+test('投稿待ちの間に書き換えた次の下書きは消さない', () => {
+  assert.equal(shouldClearSubmittedDraft('送信した本文', '送信した本文'), true);
+  assert.equal(shouldClearSubmittedDraft('次のコメント', '送信した本文'), false);
+});
+
+test('投稿済みか不明な失敗は一覧で確認する', () => {
+  for (const reason of [
+    'invalid_response',
+    'network_error',
+    'timeout',
+    'background_unavailable',
+    'request_failed',
+  ]) {
+    assert.equal(isAmbiguousPostFailure(reason), true);
+  }
+  assert.equal(isAmbiguousPostFailure('validation_error'), false);
+  assert.equal(isAmbiguousPostFailure('unauthorized'), false);
 });
