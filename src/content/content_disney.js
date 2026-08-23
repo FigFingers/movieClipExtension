@@ -1,9 +1,6 @@
 import {
-  clearAutoNavigation,
   detectService,
   EXT_UI_CLASS,
-  isAutoNavigation,
-  markAutoNavigation,
   markExtUi,
   openMemoSidebar,
   requestSeek,
@@ -22,6 +19,7 @@ import {
   setPlaybackContext
 } from './playbackContext.js';
 import { setTextContentIfChanged } from './domUpdates.js';
+import { normalizePlaybackRoute } from '../shared/playbackBridgeValidation.js';
 import {
   addPlaybackOwnerToUrl,
   claimPlaybackOwnership,
@@ -33,19 +31,13 @@ import {
 
 (() => {
   ensurePlaybackContext();
-  const AUTO_NAV_STORAGE_KEY = 'autoNav';
   const AUTO_NAV_TTL_MS = 15000;
   let autoNavCache = null;
   let activePlaybackOwnerNonce = null;
   let playbackLocation = null;
 
   function routeIdentity(url) {
-    try {
-      const parsed = new URL(url, location.href);
-      return `${parsed.origin}${parsed.pathname}`;
-    } catch {
-      return String(url || '');
-    }
+    return normalizePlaybackRoute(url, location.href) || String(url || '');
   }
 
   function applyPlaybackContext(context, ownerNonce) {
@@ -109,28 +101,8 @@ import {
     return isAutoNavValid(autoNavCache);
   }
 
-  async function loadAutoNav() {
-    const { [AUTO_NAV_STORAGE_KEY]: autoNav } = await chrome.storage.local.get([
-      AUTO_NAV_STORAGE_KEY
-    ]);
-
-    if (!isAutoNavValid(autoNav)) {
-      if (autoNav) {
-        await chrome.storage.local.remove(AUTO_NAV_STORAGE_KEY);
-        clearAutoNavigation();
-      }
-      autoNavCache = null;
-      return null;
-    }
-
-    autoNavCache = autoNav;
-    return autoNav;
-  }
-
-  async function clearAutoNavState() {
+  function clearAutoNavState() {
     autoNavCache = null;
-    clearAutoNavigation();
-    await chrome.storage.local.remove(AUTO_NAV_STORAGE_KEY);
   }
 
   async function beginAutoNavigation({ mode, nextUrl, nextOrder, nextId }) {
@@ -151,9 +123,6 @@ import {
     };
 
     autoNavCache = autoNav;
-    markAutoNavigation(mode || 'auto');
-
-    await chrome.storage.local.set({ [AUTO_NAV_STORAGE_KEY]: autoNav });
     return true;
   }
 
@@ -212,7 +181,6 @@ import {
       right: 'dext-control-host-right'
     };
     const STYLE_ID = 'dext-control-style';
-    const HISTORY_HOOK_FLAG = '__dext_history_hooked__';
 
     const BUTTONS = [
       { id: 'dext-left-button', area: 'left', label: 'Left Button', action: myCustomActionLeft },
@@ -380,7 +348,7 @@ import {
       let container = document.getElementById(config.id);
 
       if (!container || !host.contains(container)) {
-        if (container && container.parentNode) container.parentNode.removeChild(container);
+        if (container?.parentNode) container.parentNode.removeChild(container);
 
         // Disney+ に寄せた構造: [div.button-container(tabindex=0, role="button")] ＞ [button.control] ＋ [span.label]
         container = document.createElement('div');
@@ -568,31 +536,6 @@ import {
       attach();
     }
 
-    function hookHistory() {
-      if (window[HISTORY_HOOK_FLAG]) {
-        return;
-      }
-
-      window[HISTORY_HOOK_FLAG] = true;
-
-      const dispatch = () => window.dispatchEvent(new Event('locationchange'));
-
-      for (const type of ['pushState', 'replaceState']) {
-        const original = history[type];
-        if (typeof original !== 'function') {
-          continue;
-        }
-
-        history[type] = function historyPatched() {
-          const result = original.apply(this, arguments);
-          dispatch();
-          return result;
-        };
-      }
-
-      window.addEventListener('popstate', dispatch);
-    }
-
     // Disney+ はマウス静止でネイティブのコントロール行が自動的に消える。拡張ボタンも
     // それに追随させ、(1) 一定時間ポインタ操作が無いアイドル時 (2) ウィンドウが blur した
     // ときに隠す。停止中はネイティブ同様に出したままにする。表示制御は共通の EXT_UI_CLASS
@@ -676,7 +619,6 @@ import {
     }
 
     function bootstrap() {
-      hookHistory();
       startObserver();
       scheduleInjection();
       startTabVisibilityToggle();
@@ -718,7 +660,7 @@ import {
           totalSeconds  : total,
           currentTime   : formatTime(current),
           totalTime     : formatTime(total),
-          progress      : ((current / total) * 100).toFixed(2) + "%"
+          progress      : `${((current / total) * 100).toFixed(2)}%`
         };
       }
 
@@ -992,7 +934,6 @@ import {
       const snapshot = session?.snapshot;
       const clip = snapshot?.clip;
       if (session?.context?.mode !== 'clip' || snapshot?.playClipSystemKey !== 1 || !clip) {
-        clearPlaybackContext();
         console.log('[Clip] No clip data or disabled');
         return null;
       }
@@ -1009,7 +950,10 @@ import {
       currentSession = session;
       const clipData = loadClipData(session);
       if (!clipData) return;
-      stopCurrent = Playlist.play([clipData], { loop: loopEnabled });
+      stopCurrent = Playlist.play([clipData], {
+        loop: loopEnabled,
+        onStart: clearAutoNavState
+      });
     }
 
 async function startPlaylistMode(session) {
@@ -1044,6 +988,7 @@ async function startPlaylistMode(session) {
 
   function playPlaylistClip(clipData) {
     stopCurrent = Clip.play(clipData, {
+      onStart: clearAutoNavState,
       onEnd: handlePlaylistEnd
     });
   }
@@ -1117,11 +1062,10 @@ async function startPlaylistMode(session) {
 
 
     async function startPreferredMode() {
-      const autoNav = await loadAutoNav();
       const ownerNonce = getTabPlaybackOwnerNonce();
       const session = await claimPlaybackSession(ownerNonce);
-      if (autoNav) await clearAutoNavState();
       if (!session) return;
+      autoNavCache = session.autoNavigation ? { ts: Date.now() } : null;
       currentSession = session;
       if (session.context.mode === 'playlist') {
         await startPlaylistMode(session);
@@ -1141,12 +1085,12 @@ async function startPlaylistMode(session) {
       loopEnabled = !loopEnabled;
       if (loopEnabled) {
         console.log('[Loop] ON');
-        stopActiveMode();
         const clipData = loadClipData();
         if (!clipData) {
           loopEnabled = false;
           return;
         }
+        stopActiveMode();
         stopCurrent = Playlist.play([clipData], { loop: loopEnabled });
       } else {
         console.log('[Loop] OFF - stop playback');
@@ -1181,13 +1125,12 @@ async function startPlaylistMode(session) {
 
   Mode.bootstrap();
 
-  window.addEventListener('locationchange', () => {
+  window.addEventListener('historyChange', (event) => {
     UI.scheduleInjection();
-    const nextLocation = routeIdentity(location.href);
+    const nextLocation = routeIdentity(event.detail?.url || location.href);
     if (
       activePlaybackOwnerNonce &&
       nextLocation !== playbackLocation &&
-      !isAutoNavigation() &&
       !isAutoNavActive()
     ) {
       deactivatePlaybackContext();

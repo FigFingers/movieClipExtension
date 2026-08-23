@@ -30,7 +30,7 @@
     };
   
     // popstate イベントも監視
-    window.addEventListener('popstate', (event) => {
+    window.addEventListener('popstate', () => {
       const changeEvent = new CustomEvent('historyChange', {
         detail: {
           method: 'popstate',
@@ -40,4 +40,3 @@
       window.dispatchEvent(changeEvent);
     });
   })();
-  

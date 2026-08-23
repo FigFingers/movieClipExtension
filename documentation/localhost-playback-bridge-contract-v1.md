@@ -1,6 +1,6 @@
 # Localhost playback bridge input contract v1
 
-Status: Phase 1確定  
+Status: Phase 1確定・Phase 2実装済み・Phase 4ローカル検証済み（site依存commit待ち）
 Date: 2026-08-21  
 Scope: `http://localhost:3000` / `http://127.0.0.1:3000` から拡張へ渡す単体clip・playlist再生handoff
 
@@ -71,7 +71,7 @@ numberまたは数値stringをfinite numberへ変換し、`0 <= startTime < endT
 
 ### 3.3 Service
 
-受け付けるcanonical valueは`netflix`と`disneyplus`だけとする。大文字・小文字と空白を正規化し、`disney+` / `disney`は`disneyplus`へ変換する。
+受け付けるcanonical valueは`netflix`と`disneyplus`だけとする。大文字・小文字と空白を正規化し、`disney+` / `disney` / `DISNEY_PLUS`は`disneyplus`へ変換する。`DISNEY_PLUS`はlocalhost siteのVOD正式コードである。
 
 `prime`、`amazon`、`youtube`は現行utilityに定義があるが、manifestに再生content scriptがない。このためv1のmanaged playback handoffでは拒否する。対応する場合はmanifest、再生制御、smoke testを追加して契約versionを更新する。
 
@@ -93,7 +93,7 @@ numberまたは数値stringをfinite numberへ変換し、`0 <= startTime < endT
 ### 3.5 Order
 
 - number、または10進数字だけのstringで、0以上のsafe integerを受け付ける
-- 現行siteの`PlaylistView`は`order`を送らないため、欠落時だけ配列indexを補う
+- 現行siteの`PlaylistView`は0始まりの配列indexを`order`として送る。旧site payloadで欠落した場合だけ配列indexを補う
 - 明示された不正値をindexへ置き換えて救済しない
 - 正規化後に重複があればplaylist全体を拒否する
 
@@ -204,7 +204,7 @@ window.postMessage({
 
 consoleには`source`、`reason`、`field`、`index`だけを`console.warn`する。cookie値、token、raw URL、raw payloadは出力しない。
 
-ユーザー通知はlocalhost siteがresult messageを受けて、値を含まない「再生データを確認できなかったため、クリップを開けませんでした。」を表示する。bridge自身は`alert`を出さない。site側がresult messageを表示する実装と結合確認はmerge blockerとする。
+ユーザー通知はlocalhost siteがresult messageを受け、安全な固定`reason`に対応する日本語メッセージを表示する。成功時は`role=status`、失敗時は`role=alert`とし、raw payloadやtokenは表示しない。bridge自身は`alert`を出さない。Phase 4でsite実装と実Chrome表示を確認済みである。
 
 ## 8. Backgroundでの再検証
 
@@ -226,13 +226,25 @@ contentとbackgroundが別実装で乖離しないよう、Phase 2では純粋�
 - 正常な現行siteデータ例が正規化後のschemaに一致する
 - 拒否時にstorage、registry、navigationへ部分更新がない
 - 正常・異常・上限境界のunit testが追加される
-- localhost siteがresult messageを表示できることをPhase 4で実Chrome確認する
+- localhost siteがresult messageを表示できることをPhase 4で実Chrome確認する（確認済み）
+
+実装箇所:
+
+- 共通validator: [`playbackBridgeValidation.js`](../src/shared/playbackBridgeValidation.js)
+- localhost bridge: [`getClipData.js`](../src/content/getClipData.js)
+- background再検証: [`playbackOwnership.js`](../src/background/playbackOwnership.js)
+- manifest参照bundle: `dist/getClipData.js`
+- 回帰テスト: [`playbackBridgeValidation.test.js`](../test/playbackBridgeValidation.test.js)、[`playbackOwnership.test.js`](../test/playbackOwnership.test.js)
 
 ## 11. 根拠と互換性
 
 - 現行siteの単体再生はlegacy cookie（小文字`starttime` / `endtime`）と`clipSelected`を使う
-- 現行siteのplaylist itemは`{ id, clipname, title, service, Subtitles, url, startTime, endTime }`で、`order`を持たない
+- 現行siteのplaylist itemは`{ id, order, clipname, title, service, Subtitles, url, startTime, endTime }`で、`service`には`NETFLIX`または`DISNEY_PLUS`が入る
 - 現行siteに`SET_CLIP_DATA` producerはないため、これは将来互換経路として維持する
 - コメント対象解決には正のserver clip IDが必須
 
-site sourceはこのworkspaceに含まれないため、Phase 4でsite revisionと実payloadを照合する。実payloadがこの契約と異なる場合、validatorを緩めて黙認せず、site修正または契約version更新をレビューする。
+Phase 4ではsite source `C:\dev\react--site` のrevision `9f591862fddc9a71d88590c489ac47ffd311c6a9`とローカル実payloadを照合した。`DISNEY_PLUS`は実service codeとしてvalidatorへ追加済みである。
+
+単体再生に必要な`service` cookieはsite作業ツリーで追加され、ローカル実機確認も成功している。ただし、この修正は2026-08-22時点でsiteのHEAD `9f59186`にもremote branchにも含まれていない。拡張をmergeする前にsite側修正をcommit・pushし、そのcommit hashと包含remote branchをPRへ記載する必要がある。それまではローカル環境では契約成立、配布可能なrevision間では未成立として扱う。
+
+今後実payloadがこの契約と異なる場合も、validatorを緩めて黙認せず、site修正または契約version更新をレビューする。

@@ -42,7 +42,15 @@ test('Netflix selection stores one complete mode update before opening', async (
   };
 
   const committing = commitSelectedClip({
-    data: { id: 42, title: 'Example' },
+    data: {
+      id: 42,
+      title: 'Example',
+      service: 'netflix',
+      url: '/watch/42',
+      StartTime: 10,
+      EndTime: 20,
+      ignored: 'not persisted',
+    },
     requestedClipId: 99,
     ownerNonce: 'owner-nonce-42',
     storage,
@@ -53,7 +61,14 @@ test('Netflix selection stores one complete mode update before opening', async (
   assert.deepEqual(events, ['storage:start']);
   assert.deepEqual(writes, [
     {
-      clip: { id: 42, title: 'Example', clipId: 42 },
+      clip: {
+        clipId: 42,
+        service: 'netflix',
+        url: 'https://www.netflix.com/watch/42',
+        startTime: 10,
+        endTime: 20,
+        title: 'Example',
+      },
       currentClipId: 42,
       currentClipOrder: 0,
       playClipSystemKey: 1,
@@ -67,5 +82,12 @@ test('Netflix selection stores one complete mode update before opening', async (
   const selectedClip = await committing;
 
   assert.deepEqual(events, ['storage:start', 'storage:end', 'cookies', 'open']);
-  assert.deepEqual(selectedClip, { id: 42, title: 'Example', clipId: 42 });
+  assert.deepEqual(selectedClip, {
+    clipId: 42,
+    service: 'netflix',
+    url: 'https://www.netflix.com/watch/42',
+    startTime: 10,
+    endTime: 20,
+    title: 'Example',
+  });
 });

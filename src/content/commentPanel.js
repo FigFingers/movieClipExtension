@@ -1,4 +1,3 @@
-import { storageGet } from './../shared/storage.js';
 import {
   CLOSE_COMMENT_PANEL_EVENT,
   closeMemoSidebar,
@@ -7,21 +6,16 @@ import {
   PLAYBACK_CONTEXT_CHANGED_EVENT,
   readPlaybackContext,
 } from './playbackContext.js';
+import {
+  COMMENT_BODY_MAX_CODE_POINTS,
+  isValidCommentBody,
+} from '../shared/commentText.js';
 
 export const COMMENT_PANEL_ID = 'ext-comment-panel';
 export const COMMENT_PANEL_OPEN_STATE_EVENT =
   'ext:comment-panel-open-state';
 
 const COMMENT_LIMIT = 20;
-const COMMENT_BODY_MAX_LENGTH = 500;
-const PLAYBACK_STORAGE_KEYS = [
-  'playmode',
-  'playClipSystemKey',
-  'playlistSystemKey',
-  'clip',
-  'playQueue',
-  'currentClipOrder',
-];
 const WATCHED_AUTH_STORAGE_KEYS = new Set([
   'extensionAuthToken',
   'extensionLinked',
@@ -292,12 +286,7 @@ export function resolveCurrentClipIdFromState(state = {}) {
 
 export async function resolveCurrentClipId() {
   const localPlayback = readPlaybackContext();
-  if (localPlayback.initialized) {
-    return localPlayback.context?.clipId ?? null;
-  }
-
-  const state = await storageGet(PLAYBACK_STORAGE_KEYS);
-  return resolveCurrentClipIdFromState(state);
+  return localPlayback.context?.clipId ?? null;
 }
 
 function sendRuntimeMessage(message) {
@@ -792,7 +781,7 @@ async function postComment(controller) {
     return;
   }
 
-  if (body.length > COMMENT_BODY_MAX_LENGTH) {
+  if (!isValidCommentBody(body)) {
     setStatus(controller, 'コメントは500文字以内で入力してください。', 'error');
     return;
   }
@@ -1155,14 +1144,12 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   const textareaId = `${COMMENT_PANEL_ID}-body`;
   const label = createElement('label', 'コメントを入力');
   label.className = 'composer-label';
-  label.htmlFor = textareaId;
   const textarea = createElement('textarea');
   textarea.id = textareaId;
   textarea.className = 'textarea';
   textarea.slot = 'comment-composer';
-  textarea.maxLength = COMMENT_BODY_MAX_LENGTH;
   textarea.rows = 3;
-  textarea.placeholder = 'コメントを入力（500文字まで）';
+  textarea.placeholder = `コメントを入力（${COMMENT_BODY_MAX_CODE_POINTS}文字まで）`;
   textarea.setAttribute('aria-label', 'コメントを入力');
   // Keep the editable control in the light DOM and render it through a slot.
   // Streaming sites then see a real textarea target and can apply their normal

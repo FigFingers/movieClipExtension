@@ -45,6 +45,7 @@ import {
 } from './playbackOwnership.js';
 import { setCookie } from '../util/cookies.js';
 import { buildServiceUrl } from '../util/services.js';
+import { normalizePlaybackRoute } from '../shared/playbackBridgeValidation.js';
 
 /** @typedef {import('../types/clip').ClipDataProps} ClipDataProps */
 /** @typedef {import('../types/clip').ClipListProps} ClipListProps */
@@ -601,6 +602,12 @@ function initializeNetflixPlayback() {
       });
     } catch (err) {
       console.error("クリップ選択処理でエラー:", err);
+      const unsupported = err?.message?.includes('invalid_service');
+      window.alert(
+        unsupported
+          ? 'このクリップの配信サービスには対応していません。'
+          : 'クリップを開けませんでした。時間をおいて再度お試しください。'
+      );
     }
   }
 
@@ -773,10 +780,17 @@ function initializeNetflixPlayback() {
 
       onDifferentUrl: async () => {
         markAutoNavigation("playlist");
-        const url = addPlaybackOwnerToUrl(
-          `https://www.netflix.com${next.url}?t=${Math.floor(next.startTime)}`,
-          activePlaybackOwnerNonce
+        const targetUrl = buildServiceUrl(
+          next.service,
+          next.url,
+          Math.floor(next.startTime),
+          't'
         );
+        if (!targetUrl) {
+          deactivatePlaybackContext();
+          return;
+        }
+        const url = addPlaybackOwnerToUrl(targetUrl, activePlaybackOwnerNonce);
         const prepared = await preparePlaybackNavigation(
           activePlaybackOwnerNonce,
           url
@@ -813,10 +827,12 @@ function initializeNetflixPlayback() {
     if (videoPlayer.readyState >= 1) {
       onReady();
     } else {
-      videoPlayer.addEventListener('loadedmetadata', onReady, { once: true });
       removePendingMetadataListener?.();
-      removePendingMetadataListener = () =>
-        videoPlayer?.removeEventListener('loadedmetadata', onReady);
+      const metadataPlayer = videoPlayer;
+      const removeMetadataListener = () =>
+        metadataPlayer.removeEventListener('loadedmetadata', onReady);
+      removePendingMetadataListener = removeMetadataListener;
+      metadataPlayer.addEventListener('loadedmetadata', onReady, { once: true });
     }
 
     videoPlayer.addEventListener('error', e => console.error('[Video] error:', e));
@@ -852,8 +868,8 @@ function initializeNetflixPlayback() {
         } else {
           try {
             requestSeek({ service: 'Netflix', seconds: start, videoElement: videoPlayer });
-          } catch(e) {
-            try { videoPlayer.currentTime = start; videoPlayer.play?.(); } catch(_) {}
+          } catch {
+            try { videoPlayer.currentTime = start; videoPlayer.play?.(); } catch {}
           }
           monitorClipEnd(end, start, mode);
           startCountdownLogger(end);
@@ -933,10 +949,5 @@ function initializeNetflixPlayback() {
 initializeNetflixPlayback();
 
 function routeIdentity(url) {
-  try {
-    const parsed = new URL(url, location.href);
-    return `${parsed.origin}${parsed.pathname}`;
-  } catch {
-    return String(url || '');
-  }
+  return normalizePlaybackRoute(url, location.href) || String(url || '');
 }

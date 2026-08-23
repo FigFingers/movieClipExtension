@@ -17,7 +17,7 @@ npm run build   # 一回ビルド
 npm run dev     # webpack --watch
 ```
 
-`manifest.json` は `dist/` のバンドル（`background.js` / `content.js` / `content_disney.js` / `extension_link.js`）を参照するため、**ビルドせずに読み込むと拡張は動作しない**（`dist/` は git 管理外）。
+`manifest.json` は `dist/` のバンドル（`background.js` / `content.js` / `content_disney.js` / `extension_link.js` / `getClipData.js`）を参照するため、**ビルドせずに読み込むと拡張は動作しない**（`dist/` は git 管理外）。
 
 ### 3. Load as a Chrome Extension
 

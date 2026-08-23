@@ -113,3 +113,19 @@ test('an ambiguous legacy handoff fails without retrying', async () => {
   assert.deepEqual(result, { ok: false, reason: 'ambiguous_handoff' });
   assert.equal(messages.length, 1);
 });
+
+test('a normal page stops after a non-retryable missing handoff', async () => {
+  const { messages } = installGlobals({
+    href: 'https://www.netflix.com/browse',
+    respond: () => ({
+      ok: false,
+      reason: 'handoff_not_found',
+      retryable: false,
+    }),
+  });
+
+  const result = await claimPlaybackOwnership({ nonce: null });
+  assert.equal(result.ok, false);
+  assert.equal(result.retryable, false);
+  assert.equal(messages.length, 1);
+});

@@ -348,7 +348,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // content script はこのメッセージ経由で ID を取得し、自前生成せず background に一本化する。
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'GET_OR_CREATE_INSTANCE_ID') return;
 
   getOrCreateInstanceId()

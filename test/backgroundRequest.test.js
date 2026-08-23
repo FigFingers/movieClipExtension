@@ -78,3 +78,17 @@ test('fetchJsonWithTimeout aborts while consuming the response JSON body', async
     }
   );
 });
+
+test('a completed response is accepted until the abort timer actually fires', async () => {
+  await withManualTimeout(
+    async () => ({
+      status: 200,
+      json: async () => ({ ok: true, token: 'rotated-token' }),
+    }),
+    async () => {
+      const result = await fetchJsonWithTimeout('/complete', {}, 0);
+      assert.equal(result.ok, true);
+      assert.equal(result.data.token, 'rotated-token');
+    }
+  );
+});

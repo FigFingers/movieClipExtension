@@ -1,5 +1,9 @@
-export const PLAYBACK_OWNER_STORAGE_KEY = 'playbackOwnerNonce';
-export const PLAYBACK_OWNER_QUERY_PARAM = 'dextPlaybackOwner';
+import {
+  PLAYBACK_OWNER_QUERY_PARAM,
+  PLAYBACK_OWNER_STORAGE_KEY,
+} from '../shared/playbackBridgeValidation.js';
+
+export { PLAYBACK_OWNER_QUERY_PARAM, PLAYBACK_OWNER_STORAGE_KEY };
 export const PLAYBACK_OWNER_TAB_KEY = 'dextPlaybackOwnerTab';
 function sendMessage(message) {
   return new Promise((resolve) => {
@@ -103,7 +107,8 @@ export async function claimPlaybackOwnership({ nonce }) {
     }
     if (
       (result?.reason !== 'handoff_not_found' && result?.reason !== 'route_mismatch') ||
-      !mayNeedLegacyHandoff
+      !mayNeedLegacyHandoff ||
+      result?.retryable === false
     ) {
       return result;
     }

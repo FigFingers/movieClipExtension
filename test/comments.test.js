@@ -154,8 +154,20 @@ test('コメント本文を trim し、1〜500文字だけ許可する', () => {
     clipId: 7,
     body: 'a'.repeat(500),
   }).ok, true);
+  assert.equal(validatePostClipCommentInput({
+    clipId: 7,
+    body: '😀'.repeat(500),
+  }).ok, true);
 
-  for (const body of [undefined, null, 123, '', '   ', 'a'.repeat(501)]) {
+  for (const body of [
+    undefined,
+    null,
+    123,
+    '',
+    '   ',
+    'a'.repeat(501),
+    '😀'.repeat(501),
+  ]) {
     const result = validatePostClipCommentInput({ clipId: 7, body });
     assert.equal(result.ok, false);
     assert.equal(result.field, 'body');
@@ -207,6 +219,13 @@ test('successful GET and POST responses require their expected JSON shape', () =
     postResponseFixture(1),
     1
   ), true);
+  assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
+    comments: [commentFixture(1, {
+      userId: null,
+      username: null,
+      body: '😀'.repeat(500),
+    })],
+  }), 1), true);
 
   assert.equal(isValidCommentsSuccessResponse('GET', {}, 1), false);
   assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
@@ -230,6 +249,7 @@ test('comment responses require every field in the API contract', () => {
     { clipId: undefined },
     { clipId: 2 },
     { userId: undefined },
+    { userId: 0 },
     { username: undefined },
     { body: undefined },
     { body: '' },

@@ -31,7 +31,14 @@ function clipSnapshot(
   url = `https://www.netflix.com/watch/${clipId}`
 ) {
   return {
-    clip: { id: clipId, title: `clip-${clipId}`, url },
+    clip: {
+      clipId,
+      title: `clip-${clipId}`,
+      service: 'netflix',
+      url,
+      startTime: 10,
+      endTime: 20,
+    },
     playClipSystemKey: 1,
     playlistSystemKey: 0,
     playmode: 'clip',
@@ -116,7 +123,7 @@ test('a handoff can be claimed by its source tab or an opener child only', async
       openerTabId: 999,
       nonce: 'nonce-private',
     }),
-    { ok: false, reason: 'handoff_not_found' }
+    { ok: false, reason: 'handoff_not_found', retryable: true }
   );
 });
 
@@ -133,14 +140,14 @@ test('a nonce-less legacy child claims exactly one opener-bound handoff', async 
   const claim = await harness.manager.claim({ tabId: 61, openerTabId: 60 });
   assert.equal(claim.ok, true);
   assert.equal(claim.nonce, 'nonce-legacy');
-  assert.equal(claim.snapshot.clip.id, 61);
+  assert.equal(claim.snapshot.clip.clipId, 61);
 });
 
 test('a nonce-less legacy claim can retry after BEGIN arrives', async () => {
   const harness = createHarness();
   assert.deepEqual(
     await harness.manager.claim({ tabId: 66, openerTabId: 65 }),
-    { ok: false, reason: 'handoff_not_found' }
+    { ok: false, reason: 'handoff_not_found', retryable: true }
   );
   await harness.manager.beginHandoff({
     nonce: 'nonce-late-begin',
@@ -189,7 +196,7 @@ test('releasing one active tab restores the latest remaining snapshot', async ()
     { ok: true, cleared: false }
   );
   assert.equal(harness.localStorage.data.playbackOwnerNonce, 'nonce-active-a');
-  assert.equal(harness.localStorage.data.clip.id, 11);
+  assert.equal(harness.localStorage.data.clip.clipId, 11);
 
   assert.deepEqual(
     await harness.manager.release({ tabId: 1, nonce: 'nonce-active-a' }),
@@ -228,7 +235,7 @@ test('an owner transition and another tab release are serialized without rollbac
     await Promise.all([first, second]);
 
     assert.equal(harness.localStorage.data.playbackOwnerNonce, 'nonce-serial-a');
-    assert.equal(harness.localStorage.data.clip.id, 812);
+    assert.equal(harness.localStorage.data.clip.clipId, 812);
   }
 });
 
@@ -242,11 +249,13 @@ test('reload keeps a route owner, manual navigation releases it, and prepared na
     context: { mode: 'clip', clipId: 901 },
     snapshot: clipSnapshot(nonce, 901),
   });
-  assert.equal((await reloadHarness.manager.claim({
+  const reloadClaim = await reloadHarness.manager.claim({
     tabId: 90,
     nonce,
     route: firstRoute,
-  })).ok, true);
+  });
+  assert.equal(reloadClaim.ok, true);
+  assert.equal(reloadClaim.autoNavigation, false);
   assert.equal((await reloadHarness.manager.claim({
     tabId: 90,
     nonce,
@@ -290,11 +299,13 @@ test('reload keeps a route owner, manual navigation releases it, and prepared na
     }),
     { ok: true, released: false }
   );
-  assert.equal((await autoHarness.manager.claim({
+  const autoClaim = await autoHarness.manager.claim({
     tabId: 91,
     nonce: autoNonce,
     route: 'https://www.netflix.com/watch/912?t=4',
-  })).ok, true);
+  });
+  assert.equal(autoClaim.ok, true);
+  assert.equal(autoClaim.autoNavigation, true);
 });
 
 test('claim rejects a stale owner when the document route no longer matches its clip', async () => {
@@ -318,7 +329,7 @@ test('claim rejects a stale owner when the document route no longer matches its 
       nonce,
       route: 'https://www.netflix.com/watch/999',
     }),
-    { ok: false, reason: 'route_mismatch' }
+    { ok: false, reason: 'route_mismatch', retryable: false }
   );
   assert.equal(harness.localStorage.data.playbackOwnerNonce, null);
 });
@@ -346,14 +357,14 @@ test('rapid handoffs retain nonce-bound snapshots and can be claimed independent
       nonce: 'nonce-fast-1',
     });
   assert.equal(firstClaim.ok, true);
-  assert.equal(firstClaim.snapshot.clip.id, 101);
+  assert.equal(firstClaim.snapshot.clip.clipId, 101);
   const secondClaim = await harness.manager.claim({
       tabId: 9,
       openerTabId: 7,
       nonce: 'nonce-fast-2',
     });
   assert.equal(secondClaim.ok, true);
-  assert.equal(secondClaim.snapshot.clip.id, 202);
+  assert.equal(secondClaim.snapshot.clip.clipId, 202);
 });
 
 test('expired pending handoffs are cleaned and reset stale global playback', async () => {
@@ -374,6 +385,9 @@ test('expired pending handoffs are cleaned and reset stale global playback', asy
   assert.deepEqual(registry.active, {});
   assert.deepEqual(registry.pending, {});
   assert.equal(harness.localStorage.data.playmode, null);
+  assert.equal(harness.localStorage.data.clip, null);
+  assert.equal(harness.localStorage.data.playQueue, null);
+  assert.equal(harness.localStorage.data.nextClip, null);
 });
 
 test('expiring the global pending owner restores the latest active snapshot', async () => {
@@ -396,7 +410,7 @@ test('expiring the global pending owner restores the latest active snapshot', as
     cleared: false,
   });
   assert.equal(harness.localStorage.data.playbackOwnerNonce, 'nonce-still-active');
-  assert.equal(harness.localStorage.data.clip.id, 401);
+  assert.equal(harness.localStorage.data.clip.clipId, 401);
 });
 
 test('release ignores a missing or mismatched nonce', async () => {
@@ -452,5 +466,71 @@ test('removing a source tab releases active ownership but preserves a pending ch
     nonce: 'nonce-remove-pending',
   });
   assert.equal(childClaim.ok, true);
-  assert.equal(childClaim.snapshot.clip.id, 56);
+  assert.equal(childClaim.snapshot.clip.clipId, 56);
+});
+
+test('invalid nested handoff data is rejected without any storage mutation', async () => {
+  const harness = createHarness();
+  harness.localStorage.data = { preserved: 'local' };
+  harness.sessionStorage.data = { preserved: 'session' };
+
+  const result = await harness.manager.beginHandoff({
+    nonce: 'nonce-invalid-nested',
+    sourceTabId: 70,
+    context: { mode: 'clip', clipId: 701 },
+    snapshot: {
+      ...clipSnapshot('nonce-invalid-nested', 701),
+      clip: {
+        ...clipSnapshot('nonce-invalid-nested', 701).clip,
+        service: 'youtube',
+      },
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: 'invalid_handoff' });
+  assert.deepEqual(harness.localStorage.data, { preserved: 'local' });
+  assert.deepEqual(harness.sessionStorage.data, { preserved: 'session' });
+});
+
+test('invalid ownership update leaves the active snapshot unchanged', async () => {
+  const harness = createHarness();
+  await beginAndClaim(harness, {
+    nonce: 'nonce-invalid-update',
+    sourceTabId: 71,
+    clipId: 711,
+  });
+  const beforeLocal = structuredClone(harness.localStorage.data);
+  const beforeRegistry = structuredClone(harness.sessionStorage.data);
+
+  const result = await harness.manager.update({
+    tabId: 71,
+    nonce: 'nonce-invalid-update',
+    context: { mode: 'clip', clipId: 711 },
+    patch: {
+      clip: {
+        ...clipSnapshot('nonce-invalid-update', 711).clip,
+        endTime: 5,
+      },
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: 'snapshot_mismatch' });
+  assert.deepEqual(harness.localStorage.data, beforeLocal);
+  assert.deepEqual(harness.sessionStorage.data, beforeRegistry);
+});
+
+test('reset erases retained clip and playlist payloads', async () => {
+  const harness = createHarness();
+  harness.localStorage.data = {
+    clip: { privateCookie: 'secret' },
+    playQueue: [{ title: 'old' }],
+    nextClip: { title: 'old' },
+    unrelated: 'preserved',
+  };
+
+  assert.deepEqual(await harness.manager.reset(), { ok: true });
+  assert.equal(harness.localStorage.data.clip, null);
+  assert.equal(harness.localStorage.data.playQueue, null);
+  assert.equal(harness.localStorage.data.nextClip, null);
+  assert.equal(harness.localStorage.data.unrelated, 'preserved');
 });

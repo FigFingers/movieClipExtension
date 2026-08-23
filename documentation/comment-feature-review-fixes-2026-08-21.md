@@ -29,7 +29,7 @@
 | 曖昧なPOST失敗で重複投稿 | server commit後のtimeout等で再投稿を促す | 一覧を再取得し、下書きを保持してユーザーに確認を促す | 対応済み |
 | パネル再注入・切断時の状態不整合 | 新ボタンのARIA表示が残る、listenerがリークする | trigger再登録、open-state通知、切断Observer、一括teardown | 対応済み |
 | コメント・メモ・一覧が重なる | プレイヤー幅とsidebar状態が競合 | 3種類のパネルを相互排他化し、元の幅を保存・復元 | 対応済み |
-| 入力中も動画shortcutが動く | Space・矢印などがpause/seekを発火 | window capture guard、light-DOM textarea、`stopImmediatePropagation` | 実装済み、実機確認が必要 |
+| 入力中も動画shortcutが動く | Space・矢印などがpause/seekを発火 | window capture guard、light-DOM textarea、`stopImmediatePropagation` | 実装済み、Phase 5実機確認済み |
 | Disney+のDOM更新が自己再発火 | 同じlabelを書き続け、MutationObserverとrAFがループ | 値が変わった場合だけ`textContent`を更新 | 対応済み |
 | SPA遷移・reload・tab closeの混同 | reloadで状態消失、手動遷移で古い状態が残る | route照合、`PREPARE_PLAYBACK_NAVIGATION`、tab lifecycle管理 | ロジック・単体テストで対応済み |
 
@@ -55,7 +55,7 @@
 - GETはHTTP 200、POSTはHTTP 201
 - top-level `ok === true`
 - GETの`clipId`が要求したclip IDと一致
-- commentの`id`、`clipId`、`userId`が正のsafe integer
+- commentの`id`、`clipId`が正のsafe integerで、`userId`は正のsafe integerまたは退会ユーザー匿名化時の`null`
 - `username`がstringまたはnull
 - `body`が1〜500文字
 - `createdAt`が正規化可能なISO日時
@@ -226,7 +226,7 @@ UI本体はShadow DOMに残し、textareaだけをlight DOMに置いてslot表�
 - [playbackOwnership.test.js](../test/playbackOwnership.test.js)
 - [playbackOwnershipClient.test.js](../test/playbackOwnershipClient.test.js)
 
-既存の`comments.test.js`、`commentPanel.test.js`、`content/common.test.mjs`も拡張した。追加テストは52件、全体は75件となった。
+既存の`comments.test.js`、`commentPanel.test.js`、`content/common.test.mjs`も拡張した。初回レビュー修正時点では追加52件・全体75件で、Phase 2〜4のbridge / ownership回帰テスト追加後は全体95件となった。
 
 ## 8. 自動検証結果
 
@@ -234,12 +234,12 @@ UI本体はShadow DOMに残し、textareaだけをlight DOMに置いてslot表�
 
 | コマンド | 結果 |
 |---|---|
-| `npm test` | 75 / 75 pass |
-| `npm run lint` | exit 0、error 0、warning 6、info 3 |
+| `npm test` | 95 / 95 pass |
+| `npm run lint` | exit 0、error 0、warning 0、info 0 |
 | `npm run build` | webpack production build成功 |
 | `git diff --check` | 空白エラーなし |
 
-テスト時に`package.json`へ`type: module`がないことによる`MODULE_TYPELESS_PACKAGE_JSON`警告が出るが、テスト失敗ではない。Biomeには既存コード・設定由来を含むwarning / infoが残る。
+テスト時に`package.json`へ`type: module`がないことによる`MODULE_TYPELESS_PACKAGE_JSON`警告が出るが、テスト失敗ではない。Biomeのlint diagnosticsは0件。
 
 自動テストで主に確認している内容:
 
@@ -270,41 +270,35 @@ UI本体はShadow DOMに残し、textareaだけをlight DOMに置いてslot表�
 9. ログインボタンを連打してもタブが1枚だけ開き、タブ作成失敗後は再試行できる。
 10. API応答遅延・401・再連携時に、下書きと新tokenが保持される。
 
-実機確認前には`npm run build`を実行し、manifestが参照する`dist/content.js`、`dist/content_disney.js`、`dist/background.js`、`dist/extension_link.js`を更新する。
+実機確認前には`npm run build`を実行し、manifestが参照する`dist/content.js`、`dist/content_disney.js`、`dist/background.js`、`dist/extension_link.js`、`dist/getClipData.js`を更新する。
 
 ## 10. 既知の未対応・残リスク
 
 ### 10.1 localhost bridgeの入力境界
 
-[getClipData.js](../src/content/getClipData.js) には、今回の差分でも次が残っている。
+Phase 2で[playbackBridgeValidation.js](../src/shared/playbackBridgeValidation.js)を追加し、`clipSelected`、`SET_CLIP_DATA`、`PLAY_PLAYLIST_START`を同じ正準schemaへ統一した。[getClipData.js](../src/content/getClipData.js)はwebpack entry化し、manifestは`dist/getClipData.js`を参照する。
 
-- `clipSelected`でlocalhostの非HttpOnly cookieを全件`clip`へ取り込む
-- 不正なpercent encodingで`decodeURIComponent`が例外になる可能性
-- `SET_CLIP_DATA`の`payload`欠落で例外になる
-- `SET_CLIP_DATA`のclip shapeを検証していない
-- playlist itemのID、URL、service、開始・終了時刻、件数・総サイズを検証していない
+実装済み:
 
-backgroundのownership managerはtop-levelの許可キーとclip ID整合を検証するが、nested `clip` / `playQueue`の全schemaまでは検証しない。cookie whitelist、受信時の正規化、queue上限を別途実装する必要がある。
+- cookie whitelistとcookie単位の安全なdecode
+- detailを正本とするclip ID整合確認
+- 正のsafe integer ID、Netflix / Disney+ service、HTTPS hostname、時刻範囲の検証
+- playlist itemの正規化、欠落orderのindex補完、明示的不正値・重複の拒否
+- 最大100件、raw / 正規化後とも512 KiBの上限
+- 不正入力時のall-or-nothing拒否と安全なresult message
+- background ownership managerでのnested clip / queue再検証
+- owner / pending消滅時の`clip`、`playQueue`、`nextClip`消去
+- canonical absolute URLに合わせたNetflixのservice-aware遷移
 
-ownership終了時のglobal resetはmode flag、`currentClipId`、owner nonce等を戻すが、`clip`、`playQueue`、`nextClip`本体は削除しない。このため、取り込まれた不要cookieや不正なqueueデータが`chrome.storage.local`へ残留するデータ最小化上の問題もある。
-
-入力検証では、少なくとも次を境界で確認する必要がある。
-
-- clip IDが正のsafe integer
-- `order`が重複しない非負整数
-- 対応serviceと妥当なURL
-- `0 <= startTime < endTime`となる有限数
-- queueの最大件数とシリアライズ後の最大サイズ
-
-未検証queueでは、ownershipとコメント対象だけが次clipへ更新された後に再生データの正規化が失敗し、「コメント対象は進んだが再生は進まない」「ownerが残る」といった不整合も起こり得る。
+Phase 4ではlocalhost site（`C:\dev\react--site`）の実装も確認し、`clipSelected.detail.clipId`送信、handoff結果の同一origin通知、ユーザー向け成功・失敗表示まで結合した。site側のroot layoutには認証bridgeとhandoff結果表示を常設し、content scriptの起動が遅い場合は認証状態確認を最大3回再試行する。
 
 ### 10.2 Disney+のSPAイベント境界
 
-Disney+の`history.pushState` / `replaceState` hookはisolated world内にある。ページ本体のMAIN worldで行われるhistory変更を捕捉できない場合、backgroundはownershipを解除してもcontent側のModeやUI teardownが遅れる可能性がある。
+Phase 5の実Chrome試験で、isolated world内のhookではページ本体の`history.pushState`を捕捉できず、backgroundがownershipを解除した後もcontent側にclip contextとコメントパネルが残ることを再現した。
 
-Netflixと同様にMAIN world hookへ統一するか、backgroundからcontentへownership解除を通知する改善を検討する。まず実サイトでの手動SPA遷移確認が必要。
+Disney+でも`src/util/history_change.js`を`document_start`のMAIN world content scriptとして実行し、content側は`historyChange`イベントを監視する構成へ変更した。手動SPA遷移後にcontext、owner nonce、コメントパネルが解除され、global playback stateもresetされることを再確認済みである。
 
-また、Disney+の補助的な`autoNav`は`chrome.storage.local`に置かれ、owner / tab単位ではない。複数のDisney+タブが同時に動くと、別タブがmarkerを先に読み取って削除し、遷移元タブの`sessionStorage` markerが残る可能性がある。後続の手動遷移を自動遷移と誤認しないか、2タブ実機試験とtab-scoped化が必要。
+全タブ共有だった`chrome.storage.local.autoNav`はPhase 4後の再監査で既に廃止し、background ownershipのprepared routeをtab / owner nonce単位でclaim結果へ引き継ぐ方式へ変更した。Phase 5では異なるowner・次clip・次URLを持つDisney+の2タブを同時に遷移させ、各タブがそれぞれのnonceとclip IDを維持することを実Chromeで確認した。
 
 ### 10.3 ブラウザ固有の順序とサイト干渉
 
@@ -318,14 +312,14 @@ Netflixと同様にMAIN world hookへ統一するか、backgroundからcontent�
 
 ## 11. マージ前の完了条件
 
-- [x] unit test 75件成功
-- [x] lint error 0
+- [x] unit test 98件成功
+- [x] lint error / warning / info 0
 - [x] production build成功
 - [x] `git diff --check`成功
-- [ ] Netflix実機smoke
-- [ ] Disney+実機smoke
-- [ ] localhost siteとのAPI・auth・handoff結合確認
-- [ ] localhost bridge入力検証を実装し、回帰テストを追加
+- [x] Netflix実機smoke
+- [x] Disney+実機smoke
+- [x] localhost siteとのAPI・auth・handoff結合確認
+- [x] localhost bridge入力検証を実装し、回帰テストを追加
 
 ## 12. Mergeまでの作業リスト
 
@@ -344,69 +338,109 @@ Netflixと同様にMAIN world hookへ統一するか、backgroundからcontent�
 
 ### Phase 2: localhost bridgeを修正する
 
-- [ ] cookieをwhitelistで抽出し、未知のcookieを保存しない
-- [ ] cookie decodeをtry/catchし、不正なpercent encodingでlistenerを落とさない
-- [ ] `clipSelected`のdetailとcookieから正準clipを生成する
-- [ ] `SET_CLIP_DATA`で`payload` / `clip`の存在と型を確認する
-- [ ] clip IDを正のsafe integerへ正規化する
-- [ ] `service`とURLを検証する
-- [ ] `startTime` / `endTime`を有限数へ正規化し、`0 <= startTime < endTime`を検証する
-- [ ] playlistの各itemを正規化する
-- [ ] `order`を非負整数へ統一し、重複を拒否する
-- [ ] queue件数・サイズが上限を超えた場合はhandoffを開始しない
-- [ ] `BEGIN_PLAYBACK_HANDOFF`失敗時に後続navigationを開始しない経路を確認する
-- [ ] owner / pendingがないglobal resetで、不要な`clip` / `playQueue` / `nextClip`も消去する
-- [ ] background側でもnested clip / queueを最低限再検証し、多層防御にする
+- [x] cookieをwhitelistで抽出し、未知のcookieを保存しない
+- [x] cookie decodeをtry/catchし、不正なpercent encodingでlistenerを落とさない
+- [x] `clipSelected`のdetailとcookieから正準clipを生成する
+- [x] `SET_CLIP_DATA`で`payload` / `clip`の存在と型を確認する
+- [x] clip IDを正のsafe integerへ正規化する
+- [x] `service`とURLを検証する
+- [x] `startTime` / `endTime`を有限数へ正規化し、`0 <= startTime < endTime`を検証する
+- [x] playlistの各itemを正規化する
+- [x] `order`を非負整数へ統一し、重複を拒否する
+- [x] queue件数・サイズが上限を超えた場合はhandoffを開始しない
+- [x] `BEGIN_PLAYBACK_HANDOFF`失敗時に後続navigationを開始しない経路を確認する
+- [x] owner / pendingがないglobal resetで、不要な`clip` / `playQueue` / `nextClip`も消去する
+- [x] background側でもnested clip / queueを最低限再検証し、多層防御にする
 
 完了条件: 不正入力が`chrome.storage.local`、ownership registry、再生contextのどこにも保存されない。
 
 ### Phase 3: 自動テストを追加する
 
-- [ ] 許可cookieだけがclipへ入るテスト
-- [ ] legacyの小文字時刻が正準化されるテスト
-- [ ] 不正percent encodingで例外にならないテスト
-- [ ] `SET_CLIP_DATA`のpayload欠落・clip欠落を拒否するテスト
-- [ ] 0、負数、unsafe integer、非数値clip IDを拒否するテスト
-- [ ] 不正URL・未対応serviceを拒否するテスト
-- [ ] NaN、Infinity、負の開始時刻、終了 <= 開始を拒否するテスト
-- [ ] playlistの空配列、不正item、order重複、上限超過を拒否するテスト
-- [ ] 不正queueでglobal snapshotやownerが更新されないテスト
-- [ ] ownerなしresetで機微なclip / queueデータが残らないテスト
-- [ ] `npm test`を全件成功させる
-- [ ] `npm run lint`でerror 0を確認する
-- [ ] `npm run build`を成功させる
-- [ ] `git diff --check`を成功させる
+- [x] 許可cookieだけがclipへ入るテスト
+- [x] legacyの小文字時刻が正準化されるテスト
+- [x] 不正percent encodingで例外にならないテスト
+- [x] `SET_CLIP_DATA`のpayload欠落・clip欠落を拒否するテスト
+- [x] 0、負数、unsafe integer、非数値clip IDを拒否するテスト
+- [x] 不正URL・未対応serviceを拒否するテスト
+- [x] NaN、Infinity、負の開始時刻、終了 <= 開始を拒否するテスト
+- [x] playlistの空配列、不正item、order重複、上限超過を拒否するテスト
+- [x] 不正queueでglobal snapshotやownerが更新されないテスト
+- [x] ownerなしresetで機微なclip / queueデータが残らないテスト
+- [x] `npm test`を全件成功させる
+- [x] `npm run lint`でerror / warning / info 0を確認する
+- [x] `npm run build`を成功させる
+- [x] `git diff --check`を成功させる
 
 完了条件: bridgeの正常系・異常系が自動テストされ、全検証コマンドが成功する。
 
 ### Phase 4: localhost siteとの結合確認
 
-- [ ] Chromeで最新`dist`を読み込む
-- [ ] 未連携状態からlogin tabを開き、siteと連携できる
-- [ ] unlink後にtokenが消え、再連携で新tokenが保存される
-- [ ] コメントGET / POSTがBearer tokenと正しい`extensionInstanceId`で成功する
+- [x] Chromeで最新`dist`を読み込む
+- [x] 未連携状態からlogin tabを開き、siteと連携できる
+- [x] unlink後にtokenが消え、再連携で新tokenが保存される
+- [x] コメントGET / POSTがBearer tokenと正しい`extensionInstanceId`で成功する
 - [ ] 古いtokenの401と再連携が重なっても新tokenが消えない
-- [ ] localhost起点の単体clipをNetflixで開始できる
-- [ ] localhost起点の単体clipをDisney+で開始できる
-- [ ] nonce付きhandoffが正しいclipへclaimされる
-- [ ] 既存のnonceなしhandoffが一意なopener pendingへclaimされる
-- [ ] query削除・redirect後の挙動を確認する
-- [ ] playlistの同一URL遷移を確認する
-- [ ] playlistの別URL・別service遷移を確認する
+- [x] localhost起点の単体clipをNetflixで開始できる
+- [x] localhost起点の単体clipをDisney+で開始できる
+- [x] nonce付きhandoffが正しいclipへclaimされる
+- [x] 既存のnonceなしhandoffが一意なopener pendingへclaimされる
+- [x] URLからnonceを削除した後もreloadでownershipを復元できる
+- [x] playlistの同一URL遷移を確認する
+- [x] playlistの別URL・別service遷移を確認する
 
 完了条件: site、extension、background、配信サービスを通る主要な正常系が実Chromeで成立する。
 
+#### Phase 4 実施結果（2026-08-21）
+
+検証環境:
+
+- Chrome `151.0.7922.138`
+- extension branch `codex/fix-comment-feature-review`
+- localhost site revision `9f591862fddc9a71d88590c489ac47ffd311c6a9` にPhase 4の未commit修正を追加
+- localhost DB migration `20260809000000_harden_clip_comments` を適用
+
+結合確認結果:
+
+- siteのextension API smokeは31 / 31成功した。
+- 実extensionのBearer tokenと36文字の`extensionInstanceId`でコメントGET / POSTが成功した。作成した検証コメントは確認後に削除した。
+- unlinkでtokenと現instanceの連携行が消え、同じinstance IDの再連携で別tokenが保存された。
+- localhostの単体再生からNetflix clip 61をnonceなし互換経路でclaimし、コメント対象、再生context、コメントボタンが一致した。
+- localhostの単体再生からDisney+ clip 24をnonceなし互換経路でclaimし、コメント対象、再生context、コメントボタン、開始位置812秒が一致した。
+- nonce付きplaylist handoffをDisney+ clip 23でclaimし、同一URLのclip 24へ遷移後、`currentClipOrder`、`currentClipId`、コメント対象、開始位置812秒が更新された。
+- Netflix clip 61からDisney+ clip 24への別URL・別service遷移が同じtabとowner nonceで成立した。
+- URLから`dextPlaybackOwner`を除去してreloadしても、tab-local nonceからclip 24のownershipを復元した。今回の実データではservice側redirect自体は発生しなかった。
+- siteのhandoff成功・失敗通知は同一window / 同一originだけを受け、成功時`role=status`、失敗時`role=alert`で表示された。
+
+実機で判明して修正した結合不整合:
+
+1. siteの`ExtensionLinker`がroot layoutにmountされておらず、自動連携が開始されなかった。
+2. siteの初回認証確認がcontent scriptの`document_idle`登録より先に1回だけ送られ、起動競合で未連携表示が残った。250ms間隔・最大3回の再試行へ変更した。
+3. siteが`EXTENSION_PLAYBACK_HANDOFF_RESULT`を表示していなかったため、共通status / alertを追加した。
+4. siteの単体再生が`service` cookieを書かず、extensionが`invalid_service`で拒否したため、許可済みserviceをcookieへ追加した。
+5. siteのDisney+正式コードが`DISNEY_PLUS`、extensionの受理値が`Disney+` / `disney`だけだったため、`DISNEY_PLUS`を`disneyplus`へ正規化した。
+
+検証コマンド:
+
+- extension: `npm test` 95 / 95、`npm run lint` diagnostics 0、`npm run build`成功
+- site: `npm run codex:quick` 141 / 141、lint成功、typecheck成功
+- site API: `npm run smoke:extension` 31 / 31
+
+未完了項目:
+
+- 古いtokenの401応答と再連携の保存が同一実時間で交錯するケースは、実APIでは意図的に競合させていない。旧token 401後の再連携、再連携後の旧401、置換済みtokenを消さないCASの3経路は自動テスト済みであり、通常のunlink / relink実機確認も成功している。
+- 既存playlist 1のNetflix URLは現在のアカウントでplayerを生成できない古い作品だったため、playlist遷移はsiteと同じ`playQueue`形式の一時fixtureで確認した。DBにはfixtureを保存していない。
+
 ### Phase 5: 複数タブとUIの実機smoke
 
-- [ ] Tab A / Tab Bで別clipを再生し、コメント対象が混線しない
-- [ ] Tab Bを閉じてもTab Aの再生・コメントが維持される
-- [ ] reload後も同じclipのownershipが復元される
-- [ ] 手動で別作品へ移動すると再生contextとコメントパネルが解除される
-- [ ] Disney+の手動SPA遷移をcontent側が検知できる
-- [ ] Disney+の2タブ同時自動遷移で`autoNav` markerが混線しない
-- [ ] controls再生成後もコメントボタンの色とARIAが一致する
-- [ ] コメント・メモ入力中のSpace、矢印、Enter、Escape、IMEを確認する
-- [ ] site CSSでtextareaの表示・操作が崩れない
+- [x] Tab A / Tab Bで別clipを再生し、コメント対象が混線しない
+- [x] Tab Bを閉じてもTab Aの再生・コメントが維持される
+- [x] reload後も同じclipのownershipが復元される
+- [x] 手動で別作品へ移動すると再生contextとコメントパネルが解除される
+- [x] Disney+の手動SPA遷移をcontent側が検知できる
+- [x] Disney+の2タブ同時自動遷移で`autoNav` markerが混線しない
+- [x] controls再生成後もコメントボタンの色とARIAが一致する
+- [x] コメント・メモ入力中のSpace、矢印、Enter、Escape、IMEを確認する
+- [x] site CSSでtextareaの表示・操作が崩れない
 
 失敗時の対応:
 
@@ -416,13 +450,75 @@ Netflixと同様にMAIN world hookへ統一するか、backgroundからcontent�
 
 完了条件: 誤ったclipへ再生・コメント投稿しないことと、入力UIが配信サイトの操作と競合しないことを確認する。
 
+#### Phase 5 実施結果（2026-08-22）
+
+検証環境:
+
+- Chrome `151.0.7922.138`（Windows、専用プロフィール、unpacked extension）
+- extension: `codex/fix-comment-feature-review`、HEAD `6293cb7` + Phase 1〜5の未commit差分
+- localhost site / API: `C:\dev\react--site`、HEAD `9f59186` + Phase 4の未commit結合差分
+
+確認結果:
+
+- Netflix clip 61とDisney+ clip 24を別タブで同時にowner化し、両タブのsession context、owner nonce、コメントパネルが別々に維持された。global stateが後から開いたtabへ切り替わっても、既存tabのコメント対象は変化しなかった。
+- Disney+側のtabを閉じてもNetflix側のclip 61、owner nonce、開いていたコメントパネルは維持された。
+- Netflix clip 61をreloadし、URL queryを除去済みの状態でも同じtab-local nonceとclip 61 contextが復元された。
+- NetflixでMAIN-world `history.pushState`による手動route変更を行い、context、nonce、コメントパネル、global stateが解除された。
+- Disney+では最初の試験で、isolated-world history hookがMAIN-worldのroute変更を捕捉できない不具合を再現した。MAIN-world hookへ修正後、同じ手順でcontext、nonce、パネルの解除を確認した。
+- 一時fixtureを使い、Disney+ Tab Aをclip 23からclip 101 / 別URLへ、Tab Bをclip 24からclip 102 / 別URLへほぼ同時に自動遷移させた。両tabとも固有nonceと期待clip IDを維持し、marker混線はなかった。fixtureはDBへ保存していない。
+- Disney+でコメントパネルを開いたままコメントbuttonをDOMから除去し、再生成後も`aria-expanded=true`とactive表示が維持され、新buttonから閉じると両方がfalseへ戻った。
+- 実clip 24のコメントtextareaでSpace、矢印、Enter、Escape、日本語入力・composition eventを実行した。document / page側のkeydownへ伝播せず、動画はpause位置を維持し、Escapeだけがパネルを閉じた。
+- メモ入力ではSpace、矢印、Escape、日本語入力、IME変換中Enterを実行した。page側へ伝播せず、動画状態とsidebarを維持した。通常Enterは保存操作になるため、不要なAPI書き込みを避けてIME変換中Enterで確認した。
+- textareaは`color: rgb(17, 17, 17)`、白背景、`pointer-events:auto`、実寸`387.3 x 82px`で、Disney+のpage CSSによる表示・操作崩れはなかった。
+
+試験上の境界:
+
+- Netflix同士の同時player起動はサービス側のM7020で拒否されたため、一般の2tab分離はNetflix / Disney+のcross-service、同一serviceの同時自動遷移はDisney+ 2tabで確認した。
+- 実IME候補ウィンドウの視覚確認は自動化対象外だが、composition event、入力値、キー伝播、動画状態は確認した。
+
 ### Phase 6: Merge準備
 
-- [ ] 実機確認日、Chrome version、site revision、API revisionを記録する
-- [ ] 成功・失敗したsmoke結果を本資料へ追記する
-- [ ] 未解決項目があればissue化し、merge blockerかfollow-upかを明記する
-- [ ] 最終diffを再レビューする
-- [ ] commitを作成する
-- [ ] draft PRを通常PRへ切り替える
+- [x] 実機確認日、Chrome version、site revision、API revisionを記録する
+- [x] 成功・失敗したsmoke結果を本資料へ追記する
+- [x] 未解決項目があればissue化し、merge blockerかfollow-upかを明記する
+- [x] 最終diffを再レビューする
+- [x] commitを作成する
+- [x] PRを通常レビュー可能な状態にする（既存draft PRは無いため、通常PRを新規作成）
 
 最終完了条件: Phase 1〜5が完了し、残課題と検証証跡をレビュー可能な状態でmergeする。
+
+#### Phase 6 実施結果（2026-08-23）
+
+- 実機smoke実施日: 2026-08-22
+- Chrome: `151.0.7922.138`（Windows、専用profile、Load unpacked）
+- extension: branch `codex/fix-comment-feature-review`、レビュー開始HEAD `6293cb7` + Phase 1〜5差分
+- localhost site / API: `C:\dev\react--site`、branch `feat/clip-comments-site-ui-squashed`、ローカルHEAD `9f591862fddc9a71d88590c489ac47ffd311c6a9`
+- site remote revision: [FigFingers/react--site#62](https://github.com/FigFingers/react--site/pull/62) のHEAD `486bca3141b897833844e87b5c12cac9040a8dba`
+- 最終自動検証: `npm test` 98/98、`npm run lint` error 0、`npm run build`成功、`git diff --check`成功
+
+最終diffでは、backgroundのauth / timeout / comment schema、tab-scoped playback ownership、localhost bridge validator、Netflix / Disney+ lifecycle、コメントpanel、manifest / webpack、テスト、契約資料を再確認した。新たなコード上のmerge blockerは見つからず、資料冒頭に残っていた退会ユーザーの`userId: null`契約だけを現実装へ合わせて訂正した。
+
+未解決項目はsite PR #62で追跡する。site側の`service` cookie追加とhandoff結果UIは実Chromeで成立しているが、上記remote revisionには未収録であるため、extensionのmerge blockerとする。site側の必要差分をcommit・pushし、PR #62のremote HEADに含まれたことを確認するまではextensionをmergeしない。Netflixの同一アカウント2player制限（M7020）と実IME候補ウィンドウの目視未実施は試験環境上の境界であり、今回のコードmerge blockerにはしない。
+
+## 12. 2026-08-22 未push差分レビューの追加対応
+
+`docs/unpushed-review-2026-08-22.md`を現在のextension・site両作業ツリーへ再照合し、成立した指摘と追加で判明した契約差を修正した。
+
+| 項目 | 対応 |
+|---|---|
+| コメント本文の500文字境界 | UTF-16 code unitではなくUnicode code pointでPOST入力とGET/POSTレスポンスを検証。textareaのnative `maxLength`も外し、絵文字を500 code pointまで扱えるよう統一 |
+| 退会ユーザーのコメント | siteが匿名化時に返す`userId: null`を正常レスポンスとして許可 |
+| 完了済みrefreshの誤timeout | fetchとJSON bodyが完了した後は壁時計を再判定せず、AbortSignalが実際に発火した場合だけtimeout扱い |
+| Disney+ループ切替 | playlist contextをclip loaderが消さず、非clip modeでは現在再生を停止しない |
+| Disney+ auto-navigation | 全タブ共有`chrome.storage.local.autoNav`を廃止。background ownershipのprepared routeをclaim結果へ引き継ぎ、tab/nonce単位で判定 |
+| Netflixクリップ選択エラー | unsupported serviceと一般エラーをalertでユーザーへ通知 |
+| Netflix metadata listener | listener登録時のvideo要素をremoverへ固定し、プレイヤー差し替え後も正しい要素から解除 |
+| 通常ページのclaim | backgroundが`retryable:false`を返した場合は1回で停止。legacy child handoffだけ待機を継続 |
+| ownershipのno-op処理 | ownerも対象pendingもないnavigationではregistryを書き戻さず、global playbackが既に空ならreset書き込みも省略 |
+| route/owner定義 | owner query/storage keyとroute正規化を共通validator moduleへ集約し、canonical snapshot到達後の相対URL死コードを削除 |
+| コメント対象解決 | 本番で到達しないglobal playback storage fallbackを削除し、tab-local contextが無ければfail closed |
+| コメントlabel | shadow rootからlight DOM textareaを参照できない`htmlFor`を削除し、既存の`aria-label`とclick focus処理へ一本化 |
+
+仕様判断として、playback bridge v1はNetflix / Disney+限定を維持する。Prime / YouTubeを含むplaylistの部分再生互換は今回のmerge blockerに含めず、必要なら契約versionを更新する別変更として扱う。
+
+site側の`service` cookie追加はローカル作業ツリーにのみ存在するため、site commit・pushとremote branch包含確認が完了するまではmerge blockerとして残る。

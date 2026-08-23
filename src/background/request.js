@@ -20,7 +20,6 @@ export async function fetchJsonWithTimeout(
   timeoutMs = BACKGROUND_REQUEST_TIMEOUT_MS
 ) {
   const abortController = new AbortController();
-  const deadline = Date.now() + timeoutMs;
   const timeoutId = setTimeout(() => {
     abortController.abort();
   }, timeoutMs);
@@ -31,14 +30,14 @@ export async function fetchJsonWithTimeout(
       signal: abortController.signal,
     });
     const data = await parseJson(response);
-    if (abortController.signal.aborted || Date.now() >= deadline) {
+    if (abortController.signal.aborted) {
       const error = new Error('Request timed out');
       error.name = 'AbortError';
       return { ok: false, error, timedOut: true };
     }
     return { ok: true, response, data };
   } catch (error) {
-    const timedOut = abortController.signal.aborted || Date.now() >= deadline;
+    const timedOut = abortController.signal.aborted;
     return {
       ok: false,
       error,

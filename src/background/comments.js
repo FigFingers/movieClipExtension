@@ -5,10 +5,10 @@ import {
   storageGet,
 } from './../shared/storage.js';
 import { runExclusive } from './sync.js';
+import { isValidCommentBody } from '../shared/commentText.js';
 
 const DEFAULT_COMMENT_LIMIT = 20;
 const MAX_COMMENT_LIMIT = 100;
-const MAX_COMMENT_BODY_LENGTH = 500;
 export const COMMENTS_REQUEST_TIMEOUT_MS = 15 * 1000;
 
 function validationError(field, message) {
@@ -74,7 +74,7 @@ export function validatePostClipCommentInput(input = {}) {
   }
 
   const body = input.body.trim();
-  if (body.length < 1 || body.length > MAX_COMMENT_BODY_LENGTH) {
+  if (!isValidCommentBody(body)) {
     return validationError('body', 'body must contain 1 to 500 characters after trimming');
   }
 
@@ -132,11 +132,9 @@ function isComment(value, expectedClipId) {
   return isPlainObject(value)
     && isPositiveSafeInteger(value.id)
     && value.clipId === expectedClipId
-    && isPositiveSafeInteger(value.userId)
+    && (isPositiveSafeInteger(value.userId) || value.userId === null)
     && (typeof value.username === 'string' || value.username === null)
-    && typeof value.body === 'string'
-    && value.body.trim().length >= 1
-    && value.body.length <= MAX_COMMENT_BODY_LENGTH
+    && isValidCommentBody(value.body)
     && isIsoDateString(value.createdAt);
 }
 

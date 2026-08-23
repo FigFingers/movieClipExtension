@@ -1,9 +1,19 @@
-export const PLAYBACK_OWNER_STORAGE_KEY = 'playbackOwnerNonce';
+import {
+  normalizePlaybackContext,
+  normalizePlaybackRoute as normalizeRoute,
+  normalizePlaybackSnapshot,
+  PLAYBACK_OWNER_QUERY_PARAM,
+  PLAYBACK_OWNER_STORAGE_KEY,
+} from '../shared/playbackBridgeValidation.js';
+
+export { PLAYBACK_OWNER_STORAGE_KEY };
 export const PLAYBACK_REGISTRY_STORAGE_KEY = 'activePlaybackTabsV1';
 export const PLAYBACK_HANDOFF_TTL_MS = 30_000;
-const PLAYBACK_OWNER_QUERY_PARAM = 'dextPlaybackOwner';
 
 const GLOBAL_PLAYBACK_RESET = Object.freeze({
+  clip: null,
+  playQueue: null,
+  nextClip: null,
   playClipSystemKey: 0,
   playlistSystemKey: 0,
   currentClipOrder: 0,
@@ -28,15 +38,6 @@ function isNonce(value) {
   return typeof value === 'string' && value.length >= 8 && value.length <= 200;
 }
 
-function normalizeRoute(value) {
-  try {
-    const url = new URL(value);
-    return `${url.origin}${url.pathname}`;
-  } catch {
-    return null;
-  }
-}
-
 function getOwnerNonceFromUrl(value) {
   try {
     return new URL(value).searchParams.get(PLAYBACK_OWNER_QUERY_PARAM);
@@ -46,38 +47,8 @@ function getOwnerNonceFromUrl(value) {
 }
 
 function normalizeContext(value) {
-  const clipId = Number(value?.clipId);
-  if (
-    (value?.mode !== 'clip' && value?.mode !== 'playlist') ||
-    !Number.isSafeInteger(clipId) ||
-    clipId <= 0
-  ) {
-    return null;
-  }
-  return { mode: value.mode, clipId };
-}
-
-function resolveSnapshotContext(snapshot) {
-  const mode = snapshot?.playmode === 'playlist' || snapshot?.playmode === 'clip'
-    ? snapshot.playmode
-    : snapshot?.playClipSystemKey === 1
-      ? 'clip'
-      : snapshot?.playlistSystemKey === 1
-        ? 'playlist'
-        : null;
-  if (!mode) return null;
-
-  let clipId;
-  if (mode === 'clip') {
-    clipId = snapshot.clip?.clipId ?? snapshot.clip?.id;
-  } else {
-    const order = Number(snapshot.currentClipOrder);
-    const clip = Array.isArray(snapshot.playQueue)
-      ? snapshot.playQueue.find((item) => Number(item?.order) === order)
-      : null;
-    clipId = clip?.clipId ?? clip?.id;
-  }
-  return normalizeContext({ mode, clipId });
+  const normalized = normalizePlaybackContext(value);
+  return normalized.ok ? normalized.value : null;
 }
 
 function resolveSnapshotClip(snapshot, context) {
@@ -93,32 +64,17 @@ function snapshotMatchesRoute(snapshot, context, route) {
   if (!normalizedRoute) return false;
   const rawUrl = resolveSnapshotClip(snapshot, context)?.url;
   if (typeof rawUrl !== 'string' || rawUrl.length === 0) return false;
-  try {
-    const absolute = /^https?:\/\//i.test(rawUrl)
-      ? rawUrl
-      : /^(?:www\.)?(?:netflix|disneyplus)\.com\//i.test(rawUrl)
-        ? `https://${rawUrl}`
-        : new URL(rawUrl.startsWith('/') ? rawUrl : `/${rawUrl}`, normalizedRoute).toString();
-    return normalizeRoute(absolute) === normalizedRoute;
-  } catch {
-    return false;
-  }
+  return normalizeRoute(rawUrl) === normalizedRoute;
 }
 
 function normalizeSnapshot(snapshot, nonce, context) {
   if (snapshot?.[PLAYBACK_OWNER_STORAGE_KEY] !== nonce) return null;
-  const snapshotContext = resolveSnapshotContext(snapshot);
-  if (
-    snapshotContext?.mode !== context.mode ||
-    snapshotContext.clipId !== context.clipId
-  ) {
-    return null;
-  }
-  return Object.fromEntries(
-    SNAPSHOT_KEYS
-      .filter((key) => snapshot[key] !== undefined)
-      .map((key) => [key, snapshot[key]])
-  );
+  const normalized = normalizePlaybackSnapshot({
+    snapshot,
+    context,
+    ownerNonce: nonce,
+  });
+  return normalized.ok ? normalized.value : null;
 }
 
 export function createPlaybackOwnershipManager({
@@ -169,7 +125,13 @@ export function createPlaybackOwnershipManager({
       Object.keys(registry.active).length === 0 &&
       Object.keys(registry.pending).length === 0
     ) {
-      await localStorage.set(GLOBAL_PLAYBACK_RESET);
+      const current = await localStorage.get(SNAPSHOT_KEYS);
+      const alreadyReset = SNAPSHOT_KEYS.every((key) => {
+        const value = current?.[key];
+        const resetValue = GLOBAL_PLAYBACK_RESET[key];
+        return value === resetValue || (value === undefined && resetValue !== undefined);
+      });
+      if (!alreadyReset) await localStorage.set(GLOBAL_PLAYBACK_RESET);
       return true;
     }
     return false;
@@ -265,6 +227,11 @@ export function createPlaybackOwnershipManager({
 
       const registry = await readRegistry();
       const tabKey = String(tabId);
+      const canRetryLegacyHandoff = () =>
+        Number.isInteger(openerTabId) ||
+        Object.values(registry.pending).some(
+          (entry) => Number(entry?.sourceTabId) === tabId
+        );
       let resolvedNonce = nonce;
       if (!isNonce(resolvedNonce)) {
         resolvedNonce = registry.active[tabKey]?.nonce;
@@ -283,9 +250,12 @@ export function createPlaybackOwnershipManager({
         }
       }
       if (!isNonce(resolvedNonce)) {
-        await writeRegistry(registry);
         await clearGlobalIfIdle(registry);
-        return { ok: false, reason: 'handoff_not_found' };
+        return {
+          ok: false,
+          reason: 'handoff_not_found',
+          retryable: canRetryLegacyHandoff(),
+        };
       }
       const existing = registry.active[tabKey];
       const handoff = registry.pending[resolvedNonce];
@@ -299,9 +269,12 @@ export function createPlaybackOwnershipManager({
             Number(handoff?.targetTabId) === tabId
           ));
       if (!mayClaim) {
-        await writeRegistry(registry);
         await clearGlobalIfIdle(registry);
-        return { ok: false, reason: 'handoff_not_found' };
+        return {
+          ok: false,
+          reason: 'handoff_not_found',
+          retryable: canRetryLegacyHandoff(),
+        };
       }
 
       const source = existing?.nonce === resolvedNonce ? existing : handoff;
@@ -315,6 +288,11 @@ export function createPlaybackOwnershipManager({
       }
 
       const claimRoute = normalizeRoute(route);
+      const autoNavigation = Boolean(
+        existing?.nonce === resolvedNonce &&
+        claimRoute &&
+        (existing.expectedRoute === claimRoute || existing.autoNavigationRoute === claimRoute)
+      );
       if (claimRoute && !snapshotMatchesRoute(normalizedSnapshot, normalizedContext, claimRoute)) {
         if (existing?.nonce === resolvedNonce) {
           delete registry.active[tabKey];
@@ -324,7 +302,11 @@ export function createPlaybackOwnershipManager({
         } else {
           await writeRegistry(registry);
         }
-        return { ok: false, reason: 'route_mismatch' };
+        return {
+          ok: false,
+          reason: 'route_mismatch',
+          retryable: canRetryLegacyHandoff(),
+        };
       }
       if (
         existing?.nonce === resolvedNonce &&
@@ -337,7 +319,11 @@ export function createPlaybackOwnershipManager({
         await writeRegistry(registry);
         await restoreLatestOwnedSnapshot(registry, existing.nonce);
         await clearGlobalIfIdle(registry);
-        return { ok: false, reason: 'route_mismatch' };
+        return {
+          ok: false,
+          reason: 'route_mismatch',
+          retryable: canRetryLegacyHandoff(),
+        };
       }
 
       await localStorage.set(normalizedSnapshot);
@@ -347,6 +333,7 @@ export function createPlaybackOwnershipManager({
         snapshot: normalizedSnapshot,
         route: claimRoute || existing?.route || null,
         expectedRoute: null,
+        autoNavigationRoute: null,
         revision: takeRevision(registry),
         updatedAt: now(),
       };
@@ -357,6 +344,7 @@ export function createPlaybackOwnershipManager({
         nonce: resolvedNonce,
         context: normalizedContext,
         snapshot: normalizedSnapshot,
+        autoNavigation,
       };
     });
   }
@@ -408,6 +396,7 @@ export function createPlaybackOwnershipManager({
         snapshot: normalizedSnapshot,
         route: normalizeRoute(route) || existing.route || null,
         expectedRoute: existing.expectedRoute || null,
+        autoNavigationRoute: existing.autoNavigationRoute || null,
         revision: takeRevision(registry),
         updatedAt: now(),
       };
@@ -434,6 +423,7 @@ export function createPlaybackOwnershipManager({
         return { ok: false, reason: 'not_owner' };
       }
       existing.expectedRoute = nextRoute;
+      existing.autoNavigationRoute = null;
       await writeRegistry(registry);
       return { ok: true };
     });
@@ -472,19 +462,21 @@ export function createPlaybackOwnershipManager({
       if (!existing) {
         const pendingNonce = getOwnerNonceFromUrl(url);
         if (isNonce(pendingNonce) && registry.pending[pendingNonce]) {
-          registry.pending[pendingNonce].targetTabId = tabId;
+          if (registry.pending[pendingNonce].targetTabId !== tabId) {
+            registry.pending[pendingNonce].targetTabId = tabId;
+            await writeRegistry(registry);
+          }
         }
-        await writeRegistry(registry);
         return { ok: true, released: false };
       }
       const nextRoute = normalizeRoute(url);
       if (nextRoute && nextRoute === existing.route) {
-        await writeRegistry(registry);
         return { ok: true, released: false };
       }
       if (nextRoute && nextRoute === existing.expectedRoute) {
         existing.route = nextRoute;
         existing.expectedRoute = null;
+        existing.autoNavigationRoute = nextRoute;
         await writeRegistry(registry);
         return { ok: true, released: false };
       }

@@ -108,7 +108,7 @@ test('invalid contexts are rejected instead of leaking global playback state', (
   }
 });
 
-test('comment resolution falls back globally only before local initialization', async () => {
+test('comment resolution fails closed before local initialization', async () => {
   const previousChrome = globalThis.chrome;
   let globalReads = 0;
   Object.defineProperty(globalThis, 'chrome', {
@@ -130,10 +130,10 @@ test('comment resolution falls back globally only before local initialization', 
   });
 
   try {
-    assert.equal(await resolveCurrentClipId(), 91);
+    assert.equal(await resolveCurrentClipId(), null);
     clearPlaybackContext();
     assert.equal(await resolveCurrentClipId(), null);
-    assert.equal(globalReads, 1);
+    assert.equal(globalReads, 0);
   } finally {
     Object.defineProperty(globalThis, 'chrome', {
       configurable: true,
