@@ -11,6 +11,7 @@ import {
 class MemoryStorageArea {
   constructor(initial = {}) {
     this.data = { ...initial };
+    this.nextSetFailure = null;
   }
 
   async get(keys) {
@@ -21,7 +22,22 @@ class MemoryStorageArea {
   }
 
   async set(items) {
+    const failure = this.nextSetFailure;
+    this.nextSetFailure = null;
+    if (failure && !failure.afterWrite) throw failure.error;
     Object.assign(this.data, items);
+    if (failure?.afterWrite) throw failure.error;
+  }
+
+  async remove(keys) {
+    for (const key of Array.isArray(keys) ? keys : [keys]) delete this.data[key];
+  }
+
+  failNextSet({ afterWrite = false } = {}) {
+    this.nextSetFailure = {
+      afterWrite,
+      error: new Error('injected storage failure'),
+    };
   }
 }
 
@@ -175,6 +191,58 @@ test('a nonce-less legacy claim rejects ambiguous opener handoffs', async () => 
     await harness.manager.claim({ tabId: 71, openerTabId: 70 }),
     { ok: false, reason: 'ambiguous_handoff' }
   );
+});
+
+test('an explicitly supplied malformed nonce never falls back to a legacy handoff', async () => {
+  const harness = createHarness();
+  await harness.manager.beginHandoff({
+    nonce: 'nonce-explicit-target',
+    sourceTabId: 75,
+    context: { mode: 'clip', clipId: 76 },
+    snapshot: clipSnapshot('nonce-explicit-target', 76),
+  });
+
+  assert.deepEqual(
+    await harness.manager.claim({
+      tabId: 76,
+      openerTabId: 75,
+      nonce: 'bad',
+    }),
+    { ok: false, reason: 'invalid_claim' }
+  );
+  const registry = harness.sessionStorage.data[PLAYBACK_REGISTRY_STORAGE_KEY];
+  assert.equal(registry.pending['nonce-explicit-target'].sourceTabId, 75);
+  assert.deepEqual(registry.active, {});
+});
+
+test('URL nonce lookup never reads or writes inherited registry properties', async () => {
+  const harness = createHarness();
+  const inheritedEntries = [
+    ['__proto__', Object.prototype],
+    ['constructor', Object],
+    ['toString', Object.prototype.toString],
+  ];
+  const previousTargets = inheritedEntries.map(([name, target]) => ({
+    name,
+    target,
+    value: target.targetTabId,
+  }));
+
+  for (const [nonce] of inheritedEntries) {
+    assert.deepEqual(
+      await harness.manager.handleTabNavigation({
+        tabId: 77,
+        url: `https://www.netflix.com/watch/77?dextPlaybackOwner=${nonce}`,
+      }),
+      { ok: true, released: false }
+    );
+  }
+
+  for (const { name, target, value } of previousTargets) {
+    assert.equal(target.targetTabId, value, `${name} was mutated`);
+  }
+  const registry = harness.sessionStorage.data[PLAYBACK_REGISTRY_STORAGE_KEY];
+  assert.deepEqual(registry.pending, {});
 });
 
 test('releasing one active tab restores the latest remaining snapshot', async () => {
@@ -332,6 +400,32 @@ test('claim rejects a stale owner when the document route no longer matches its 
     { ok: false, reason: 'route_mismatch', retryable: false }
   );
   assert.equal(harness.localStorage.data.playbackOwnerNonce, null);
+});
+
+test('prepare rejects a route that does not match the owned snapshot', async () => {
+  const harness = createHarness();
+  const nonce = 'nonce-prepare-route';
+  await beginAndClaim(harness, {
+    nonce,
+    sourceTabId: 93,
+    clipId: 931,
+  });
+
+  assert.deepEqual(
+    await harness.manager.prepareNavigation({
+      tabId: 93,
+      nonce,
+      nextUrl: 'https://www.netflix.com/watch/999',
+    }),
+    { ok: false, reason: 'route_mismatch' }
+  );
+  assert.deepEqual(
+    await harness.manager.handleTabNavigation({
+      tabId: 93,
+      url: 'https://www.netflix.com/watch/999',
+    }),
+    { ok: true, released: true, cleared: true }
+  );
 });
 
 test('rapid handoffs retain nonce-bound snapshots and can be claimed independently', async () => {
@@ -517,6 +611,77 @@ test('invalid ownership update leaves the active snapshot unchanged', async () =
   assert.deepEqual(result, { ok: false, reason: 'snapshot_mismatch' });
   assert.deepEqual(harness.localStorage.data, beforeLocal);
   assert.deepEqual(harness.sessionStorage.data, beforeRegistry);
+});
+
+test('storage failures roll back both sides of a handoff transaction', async () => {
+  for (const storageName of ['sessionStorage', 'localStorage']) {
+    for (const afterWrite of [false, true]) {
+      const harness = createHarness();
+      await beginAndClaim(harness, {
+        nonce: 'nonce-storage-existing',
+        sourceTabId: 72,
+        clipId: 721,
+      });
+      const beforeLocal = structuredClone(harness.localStorage.data);
+      const beforeSession = structuredClone(harness.sessionStorage.data);
+      harness[storageName].failNextSet({ afterWrite });
+
+      await assert.rejects(
+        harness.manager.beginHandoff({
+          nonce: 'nonce-storage-failing',
+          sourceTabId: 73,
+          context: { mode: 'clip', clipId: 731 },
+          snapshot: clipSnapshot('nonce-storage-failing', 731),
+        }),
+        /injected storage failure/
+      );
+
+      assert.deepEqual(
+        harness.localStorage.data,
+        beforeLocal,
+        `${storageName} afterWrite=${afterWrite} changed local storage`
+      );
+      assert.deepEqual(
+        harness.sessionStorage.data,
+        beforeSession,
+        `${storageName} afterWrite=${afterWrite} changed session storage`
+      );
+    }
+  }
+});
+
+test('storage failures roll back registry-only and release transitions', async () => {
+  const harness = createHarness();
+  await beginAndClaim(harness, {
+    nonce: 'nonce-storage-transition',
+    sourceTabId: 74,
+    clipId: 741,
+  });
+  const beforeLocal = structuredClone(harness.localStorage.data);
+  const beforeSession = structuredClone(harness.sessionStorage.data);
+
+  harness.sessionStorage.failNextSet({ afterWrite: true });
+  await assert.rejects(
+    harness.manager.prepareNavigation({
+      tabId: 74,
+      nonce: 'nonce-storage-transition',
+      nextUrl: 'https://www.netflix.com/watch/741?t=2',
+    }),
+    /injected storage failure/
+  );
+  assert.deepEqual(harness.localStorage.data, beforeLocal);
+  assert.deepEqual(harness.sessionStorage.data, beforeSession);
+
+  harness.localStorage.failNextSet({ afterWrite: true });
+  await assert.rejects(
+    harness.manager.release({
+      tabId: 74,
+      nonce: 'nonce-storage-transition',
+    }),
+    /injected storage failure/
+  );
+  assert.deepEqual(harness.localStorage.data, beforeLocal);
+  assert.deepEqual(harness.sessionStorage.data, beforeSession);
 });
 
 test('reset erases retained clip and playlist payloads', async () => {

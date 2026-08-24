@@ -1,6 +1,9 @@
 import {
+  clearAutoNavigation,
   detectService,
   EXT_UI_CLASS,
+  handleOwnedPlaybackRouteChange,
+  markAutoNavigation,
   markExtUi,
   openMemoSidebar,
   requestSeek,
@@ -31,8 +34,7 @@ import {
 
 (() => {
   ensurePlaybackContext();
-  const AUTO_NAV_TTL_MS = 15000;
-  let autoNavCache = null;
+  clearAutoNavigation();
   let activePlaybackOwnerNonce = null;
   let playbackLocation = null;
 
@@ -84,25 +86,11 @@ import {
     const ownerNonce = activePlaybackOwnerNonce;
     activePlaybackOwnerNonce = null;
     playbackLocation = null;
+    clearAutoNavigation();
     clearPlaybackContext();
     closeCommentPanel();
     releasePlaybackOwnership(ownerNonce);
     Mode.stop();
-  }
-
-  function isAutoNavValid(autoNav) {
-    if (!autoNav || typeof autoNav !== 'object') return false;
-    const ts = Number(autoNav.ts);
-    if (!Number.isFinite(ts)) return false;
-    return Date.now() - ts <= AUTO_NAV_TTL_MS;
-  }
-
-  function isAutoNavActive() {
-    return isAutoNavValid(autoNavCache);
-  }
-
-  function clearAutoNavState() {
-    autoNavCache = null;
   }
 
   async function beginAutoNavigation({ mode, nextUrl, nextOrder, nextId }) {
@@ -114,15 +102,15 @@ import {
       deactivatePlaybackContext();
       return false;
     }
-    const autoNav = {
-      ts: Date.now(),
-      mode,
-      nextUrl,
-      nextOrder,
-      nextId
-    };
-
-    autoNavCache = autoNav;
+    const marked = markAutoNavigation({
+      ownerNonce: activePlaybackOwnerNonce,
+      expectedRoute: routeIdentity(nextUrl),
+      reason: `${mode}:${nextOrder ?? ''}:${nextId ?? ''}`,
+    });
+    if (!marked) {
+      deactivatePlaybackContext();
+      return false;
+    }
     return true;
   }
 
@@ -952,7 +940,7 @@ import {
       if (!clipData) return;
       stopCurrent = Playlist.play([clipData], {
         loop: loopEnabled,
-        onStart: clearAutoNavState
+        onStart: clearAutoNavigation
       });
     }
 
@@ -988,7 +976,7 @@ async function startPlaylistMode(session) {
 
   function playPlaylistClip(clipData) {
     stopCurrent = Clip.play(clipData, {
-      onStart: clearAutoNavState,
+      onStart: clearAutoNavigation,
       onEnd: handlePlaylistEnd
     });
   }
@@ -1030,7 +1018,7 @@ async function startPlaylistMode(session) {
 
     const nextClipData = normalizeClipData(next);
     if (!nextClipData) {
-      console.warn('[Playlist] 次クリップのデータが不正です:', next);
+      console.warn('[Playlist] 次クリップのデータが不正です');
       return;
     }
 
@@ -1041,7 +1029,7 @@ async function startPlaylistMode(session) {
       const baseUrl = buildClipUrl(nextUrl, nextClipData.startTime);
       if (!baseUrl) return;
       const url = addPlaybackOwnerToUrl(baseUrl, activePlaybackOwnerNonce);
-      console.log('[Playlist] 異なるURL → ページ遷移:', url);
+      console.log('[Playlist] 異なるURLへページ遷移します');
 
       setTimeout(async () => {
         const prepared = await beginAutoNavigation({
@@ -1065,7 +1053,6 @@ async function startPlaylistMode(session) {
       const ownerNonce = getTabPlaybackOwnerNonce();
       const session = await claimPlaybackSession(ownerNonce);
       if (!session) return;
-      autoNavCache = session.autoNavigation ? { ts: Date.now() } : null;
       currentSession = session;
       if (session.context.mode === 'playlist') {
         await startPlaylistMode(session);
@@ -1128,13 +1115,15 @@ async function startPlaylistMode(session) {
   window.addEventListener('historyChange', (event) => {
     UI.scheduleInjection();
     const nextLocation = routeIdentity(event.detail?.url || location.href);
-    if (
-      activePlaybackOwnerNonce &&
-      nextLocation !== playbackLocation &&
-      !isAutoNavActive()
-    ) {
-      deactivatePlaybackContext();
-    }
+    handleOwnedPlaybackRouteChange({
+      ownerNonce: activePlaybackOwnerNonce,
+      currentRoute: playbackLocation,
+      nextRoute: nextLocation,
+      onAutoNavigation: (route) => {
+        playbackLocation = route;
+      },
+      onManualNavigation: deactivatePlaybackContext,
+    });
   });
   window.addEventListener('load', () => UI.scheduleInjection(), { once: true });
 

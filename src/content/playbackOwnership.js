@@ -5,6 +5,19 @@ import {
 
 export { PLAYBACK_OWNER_QUERY_PARAM, PLAYBACK_OWNER_STORAGE_KEY };
 export const PLAYBACK_OWNER_TAB_KEY = 'dextPlaybackOwnerTab';
+
+function readPlaybackOwnerQuery(url = globalThis.location?.href) {
+  try {
+    const searchParams = new URL(url).searchParams;
+    return {
+      present: searchParams.has(PLAYBACK_OWNER_QUERY_PARAM),
+      value: searchParams.get(PLAYBACK_OWNER_QUERY_PARAM),
+    };
+  } catch {
+    return { present: false, value: null };
+  }
+}
+
 function sendMessage(message) {
   return new Promise((resolve) => {
     const runtime = globalThis.chrome?.runtime;
@@ -27,21 +40,47 @@ function sendMessage(message) {
 }
 
 export function createPlaybackOwnerNonce() {
-  return globalThis.crypto?.randomUUID?.() ||
-    `playback-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    try {
+      const nonce = cryptoApi.randomUUID();
+      if (
+        typeof nonce === 'string' &&
+        nonce.length >= 8 &&
+        nonce.length <= 200
+      ) {
+        return nonce;
+      }
+    } catch {
+      // 実行環境でrandomUUIDを使えない場合はgetRandomValuesへフォールバックする。
+    }
+  }
+
+  if (typeof cryptoApi?.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0'));
+    return [
+      hex.slice(0, 4).join(''),
+      hex.slice(4, 6).join(''),
+      hex.slice(6, 8).join(''),
+      hex.slice(8, 10).join(''),
+      hex.slice(10).join(''),
+    ].join('-');
+  }
+
+  throw new Error('Secure random number generator is unavailable');
 }
 
 export function getPlaybackOwnerNonceFromUrl(url = globalThis.location?.href) {
-  try {
-    return new URL(url).searchParams.get(PLAYBACK_OWNER_QUERY_PARAM);
-  } catch {
-    return null;
-  }
+  return readPlaybackOwnerQuery(url).value;
 }
 
 export function getTabPlaybackOwnerNonce() {
-  const fromUrl = getPlaybackOwnerNonceFromUrl();
-  if (fromUrl) return fromUrl;
+  const fromUrl = readPlaybackOwnerQuery();
+  if (fromUrl.present) return fromUrl.value;
   try {
     return globalThis.sessionStorage?.getItem(PLAYBACK_OWNER_TAB_KEY) || null;
   } catch {
@@ -86,7 +125,8 @@ export function beginPlaybackHandoff({ nonce, mode, clipId, snapshot }) {
 }
 
 export async function claimPlaybackOwnership({ nonce }) {
-  const mayNeedLegacyHandoff = !getPlaybackOwnerNonceFromUrl();
+  const ownerQuery = readPlaybackOwnerQuery();
+  const mayNeedLegacyHandoff = !ownerQuery.present;
   let requestedNonce = nonce;
   for (let attempt = 0; attempt < (mayNeedLegacyHandoff ? 20 : 1); attempt += 1) {
     const result = await sendMessage({
@@ -99,7 +139,7 @@ export async function claimPlaybackOwnership({ nonce }) {
       return result;
     }
     if (
-      !getPlaybackOwnerNonceFromUrl() &&
+      !ownerQuery.present &&
       requestedNonce &&
       (result?.reason === 'handoff_not_found' || result?.reason === 'route_mismatch')
     ) {

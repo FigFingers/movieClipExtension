@@ -178,3 +178,19 @@ test('memory fallback wins over an older value left in sessionStorage', () => {
   storage.setItem = MemorySessionStorage.prototype.setItem;
   clearPlaybackContext();
 });
+
+test('the initialized module snapshot ignores later host-page storage tampering', () => {
+  const storage = globalThis.sessionStorage;
+  setPlaybackContext({ mode: 'clip', clipId: 20 });
+
+  storage.setItem('dextPlaybackContextV1', JSON.stringify({
+    initialized: true,
+    context: { mode: 'clip', clipId: 999 },
+  }));
+
+  assert.deepEqual(readPlaybackContext(), {
+    initialized: true,
+    context: { mode: 'clip', clipId: 20 },
+  });
+  clearPlaybackContext();
+});

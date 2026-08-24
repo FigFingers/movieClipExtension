@@ -7,6 +7,7 @@ const runtimeMessages = [];
 const scheduledTasks = [];
 let storedQueue = null;
 let runtimeResponse = { ok: true };
+let storageReadError = null;
 
 globalThis.window = {
   location: {
@@ -23,6 +24,7 @@ globalThis.window = {
 globalThis.document = { cookie: '' };
 globalThis.localStorage = {
   getItem(key) {
+    if (storageReadError) throw storageReadError;
     return key === 'playQueue' ? storedQueue : null;
   },
 };
@@ -48,6 +50,7 @@ function resetObservations() {
   scheduledTasks.length = 0;
   storedQueue = null;
   runtimeResponse = { ok: true };
+  storageReadError = null;
   window.location.href = 'http://localhost:3000/clips';
 }
 
@@ -80,6 +83,37 @@ test('SET_CLIP_DATA rejects a missing payload without contacting background', as
       requestId: 'missing-payload',
     },
   });
+});
+
+test('window messages from another source or origin are ignored', async () => {
+  resetObservations();
+  const payload = {
+    type: 'SET_CLIP_DATA',
+    payload: {
+      clip: {
+        clipId: 1,
+        service: 'netflix',
+        url: 'https://www.netflix.com/watch/1',
+        startTime: 1,
+        endTime: 2,
+      },
+    },
+  };
+
+  await listeners.message({
+    source: {},
+    origin: window.location.origin,
+    data: payload,
+  });
+  await listeners.message({
+    source: window,
+    origin: 'http://attacker.invalid',
+    data: payload,
+  });
+
+  assert.equal(runtimeMessages.length, 0);
+  assert.equal(postedMessages.length, 0);
+  assert.equal(scheduledTasks.length, 0);
 });
 
 test('invalid playlist data never reaches background or navigation', async () => {
@@ -122,5 +156,26 @@ test('failed BEGIN_PLAYBACK_HANDOFF reports failure and does not navigate', asyn
     ok: false,
     reason: 'handoff_failed',
     requestId: 'handoff-failure',
+  });
+});
+
+test('blocked playlist storage reports a fixed failure without navigation', async () => {
+  resetObservations();
+  storageReadError = new Error('private storage detail');
+
+  await listeners.message(messageEvent({
+    type: 'PLAY_PLAYLIST_START',
+    requestId: 'blocked-storage',
+  }));
+
+  assert.equal(runtimeMessages.length, 0);
+  assert.equal(scheduledTasks.length, 0);
+  assert.equal(window.location.href, 'http://localhost:3000/clips');
+  assert.deepEqual(postedMessages.at(-1).message, {
+    type: 'EXTENSION_PLAYBACK_HANDOFF_RESULT',
+    source: 'PLAY_PLAYLIST_START',
+    ok: false,
+    reason: 'handoff_failed',
+    requestId: 'blocked-storage',
   });
 });

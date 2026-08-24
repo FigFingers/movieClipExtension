@@ -65,7 +65,12 @@ function publishHandoffResult({ source, requestId, result }) {
 }
 
 async function registerClipHandoff(clip) {
-  const nonce = createPlaybackOwnerNonce();
+  let nonce;
+  try {
+    nonce = createPlaybackOwnerNonce();
+  } catch {
+    return { result: { ok: false, reason: 'handoff_failed' }, nonce: null };
+  }
   const result = await beginPlaybackHandoff({
     nonce,
     mode: 'clip',
@@ -126,7 +131,18 @@ window.addEventListener('message', async (event) => {
 
   const source = 'PLAY_PLAYLIST_START';
   const requestId = normalizeRequestId(message.requestId);
-  const normalized = normalizePlaylistJson(localStorage.getItem('playQueue'));
+  let rawQueue;
+  try {
+    rawQueue = localStorage.getItem('playQueue');
+  } catch {
+    publishHandoffResult({
+      source,
+      requestId,
+      result: { ok: false, reason: 'handoff_failed' },
+    });
+    return;
+  }
+  const normalized = normalizePlaylistJson(rawQueue);
   if (!normalized.ok) {
     publishHandoffResult({ source, requestId, result: normalized });
     return;
@@ -136,7 +152,17 @@ window.addEventListener('message', async (event) => {
   const firstClip = queue.reduce((first, item) =>
     item.order < first.order ? item : first
   );
-  const nonce = createPlaybackOwnerNonce();
+  let nonce;
+  try {
+    nonce = createPlaybackOwnerNonce();
+  } catch {
+    publishHandoffResult({
+      source,
+      requestId,
+      result: { ok: false, reason: 'handoff_failed' },
+    });
+    return;
+  }
   const handoff = await beginPlaybackHandoff({
     nonce,
     mode: 'playlist',

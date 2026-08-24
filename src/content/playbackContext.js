@@ -5,6 +5,7 @@ const PLAYBACK_CONTEXT_STORAGE_KEY = 'dextPlaybackContextV1';
 const EMPTY_SNAPSHOT = Object.freeze({ initialized: false, context: null });
 let memorySnapshot = EMPTY_SNAPSHOT;
 let memoryFallbackActive = false;
+let memoryStorage = null;
 
 function normalizeClipId(value) {
   const numberValue =
@@ -53,12 +54,22 @@ function parseStoredSnapshot(rawValue) {
 export function readPlaybackContext() {
   const storage = getSessionStorage();
   if (!storage) return memorySnapshot;
-  if (memoryFallbackActive) return memorySnapshot;
+  if (
+    memoryStorage === storage ||
+    (memoryFallbackActive && memoryStorage === null)
+  ) {
+    return memorySnapshot;
+  }
 
   try {
     const rawValue = storage.getItem(PLAYBACK_CONTEXT_STORAGE_KEY);
-    return parseStoredSnapshot(rawValue);
+    memorySnapshot = parseStoredSnapshot(rawValue);
+    memoryStorage = storage;
+    memoryFallbackActive = false;
+    return memorySnapshot;
   } catch {
+    memoryStorage = storage;
+    memoryFallbackActive = true;
     return memorySnapshot;
   }
 }
@@ -98,12 +109,15 @@ function writePlaybackContext(context) {
         PLAYBACK_CONTEXT_STORAGE_KEY,
         JSON.stringify(nextSnapshot)
       );
+      memoryStorage = storage;
       memoryFallbackActive = false;
     } catch {
       // Keep the module-local value so this tab still remains isolated.
+      memoryStorage = storage;
       memoryFallbackActive = true;
     }
   } else {
+    memoryStorage = null;
     memoryFallbackActive = true;
   }
 

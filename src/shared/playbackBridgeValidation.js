@@ -122,11 +122,21 @@ function normalizeService(value, index) {
   return { ok: true, value: normalized };
 }
 
+function hasExplicitPort(value) {
+  const authority = value
+    .trim()
+    .match(/^(?:[a-z][a-z\d+.-]*:)?[\\/]{2}([^\\/?#]*)/i)?.[1];
+  if (!authority) return false;
+  const hostAndPort = authority.slice(authority.lastIndexOf('@') + 1);
+  return hostAndPort.includes(':');
+}
+
 function normalizeUrl(value, service, index) {
   if (
     typeof value !== 'string' ||
     value.length === 0 ||
-    value.length > MAX_PLAYBACK_URL_LENGTH
+    value.length > MAX_PLAYBACK_URL_LENGTH ||
+    hasExplicitPort(value)
   ) {
     return failure('invalid_url', 'url', index);
   }
