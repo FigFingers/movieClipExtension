@@ -116,6 +116,7 @@ test('single clip input rejects unsupported services and cross-service URLs', ()
     'http://www.netflix.com/watch/1',
     'https://evil.example/watch/1',
     'https://user:pass@www.netflix.com/watch/1',
+    'https://www.netflix.com:443/watch/1',
   ]) {
     assert.equal(normalizeClipInput(clipInput({ url })).reason, 'invalid_url');
   }

@@ -4,7 +4,12 @@ import {
   clearExtensionAuthState,
   storageGet,
 } from './../shared/storage.js';
-import { runExclusive } from './sync.js';
+import {
+  isValidExtensionAuthToken,
+  isValidExtensionInstanceId,
+} from './../shared/authValidation.js';
+import { runExclusive } from './authMutex.js';
+import { getOrCreateInstanceIdWhileExclusive } from './instanceId.js';
 import { isValidCommentBody } from '../shared/commentText.js';
 
 const DEFAULT_COMMENT_LIMIT = 20;
@@ -90,6 +95,7 @@ export function getCommentsResponseReason(status) {
   if (status === 401) return 'unauthorized';
   if (status === 403) return 'forbidden';
   if (status === 404) return 'not_found';
+  if (status === 429) return 'rate_limited';
   return 'request_failed';
 }
 
@@ -192,6 +198,7 @@ async function requestCommentsApi({ method, value, signal, deadline }) {
   const stored = await storageGet([
     STORAGE_KEYS.extensionInstanceId,
     STORAGE_KEYS.extensionAuthToken,
+    STORAGE_KEYS.extensionLinked,
   ]);
   const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
   const extensionAuthToken = stored[STORAGE_KEYS.extensionAuthToken];
@@ -200,12 +207,20 @@ async function requestCommentsApi({ method, value, signal, deadline }) {
   // storage. Never start a stale network request after the caller timed out.
   if (signal.aborted || Date.now() >= deadline) return timeoutResult();
 
-  if (
-    typeof extensionInstanceId !== 'string' ||
-    extensionInstanceId.length === 0 ||
-    typeof extensionAuthToken !== 'string' ||
-    extensionAuthToken.length === 0
-  ) {
+  if (!isValidExtensionInstanceId(extensionInstanceId)) {
+    await getOrCreateInstanceIdWhileExclusive();
+    if (signal.aborted || Date.now() >= deadline) return timeoutResult();
+    return { ok: false, reason: 'missing_token' };
+  }
+
+  if (!isValidExtensionAuthToken(extensionAuthToken)) {
+    if (
+      extensionAuthToken !== undefined
+      || stored[STORAGE_KEYS.extensionLinked] === true
+    ) {
+      await clearExtensionAuthState();
+      if (signal.aborted || Date.now() >= deadline) return timeoutResult();
+    }
     return { ok: false, reason: 'missing_token' };
   }
 
@@ -245,7 +260,10 @@ async function requestCommentsApi({ method, value, signal, deadline }) {
     return { ok: false, reason: timedOut ? 'timeout' : 'network_error' };
   }
 
-  if (signal.aborted || Date.now() >= deadline) return timeoutResult();
+  // Once fetch and JSON consumption have completed, wall-clock drift alone is
+  // not a timeout. Only the timer actually aborting this request can discard a
+  // completed response (matching fetchJsonWithTimeout semantics).
+  if (signal.aborted) return timeoutResult();
 
   const expectedSuccessStatus = method === 'GET' ? 200 : 201;
   const successfulStatus = response.status === expectedSuccessStatus;

@@ -453,6 +453,12 @@ export function isAmbiguousPostFailure(reason) {
     || reason === 'request_failed';
 }
 
+export function shouldClosePanelForKeyEvent(event) {
+  return event?.type === 'keydown'
+    && event.key === 'Escape'
+    && event.isComposing !== true;
+}
+
 async function openLoginPage(controller) {
   if (controller.closed || controller.openingLogin) return;
   controller.openingLogin = true;
@@ -647,6 +653,10 @@ async function performLoadComments(
 
 function refreshCurrentClip(controller, { queueIfBusy = false } = {}) {
   if (controller.closed) return Promise.resolve();
+  if (controller.posting && queueIfBusy) {
+    controller.refreshQueued = true;
+    return Promise.resolve();
+  }
   if (controller.refreshPromise) {
     if (queueIfBusy) controller.refreshQueued = true;
     return controller.refreshPromise;
@@ -857,6 +867,10 @@ async function postComment(controller) {
     if (!controller.closed) {
       controller.posting = false;
       updateSubmitState(controller);
+      if (controller.refreshQueued) {
+        controller.refreshQueued = false;
+        void refreshCurrentClip(controller, { queueIfBusy: true });
+      }
     }
   }
 }
@@ -971,8 +985,8 @@ function notifyOpenState(controller, open) {
   }
   try {
     controller.onOpenChange?.(open);
-  } catch (error) {
-    console.warn('[extension-comments] onOpenChange failed', error);
+  } catch {
+    console.warn('[extension-comments] onOpenChange failed');
   }
   dispatchPanelOpenState(open);
 }
@@ -992,7 +1006,7 @@ function addKeyGuard(controller) {
     if (controller.closed || !eventBelongsToPanel(event, controller)) return;
     // Capture on window before the event reaches document/player shortcuts.
     event.stopImmediatePropagation();
-    if (event.type === 'keydown' && event.key === 'Escape') {
+    if (shouldClosePanelForKeyEvent(event)) {
       event.preventDefault();
       closeController(controller);
     }
@@ -1241,7 +1255,7 @@ function createPanel({ mountEl, triggerEl, onOpenChange }) {
   }
   panel.addEventListener('keydown', (event) => {
     event.stopPropagation();
-    if (event.key === 'Escape') {
+    if (shouldClosePanelForKeyEvent(event)) {
       event.preventDefault();
       closeController(controller);
     }

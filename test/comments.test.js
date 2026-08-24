@@ -3,6 +3,7 @@ import { test } from 'node:test';
 
 import {
   buildCommentsApiUrl,
+  COMMENTS_REQUEST_TIMEOUT_MS,
   fetchClipComments,
   getCommentsResponseReason,
   isValidCommentsSuccessResponse,
@@ -13,6 +14,8 @@ import {
 import { saveExtensionAuthTokenInBackground } from '../src/background/authState.js';
 import { runExclusive } from '../src/background/sync.js';
 
+const INSTANCE_ID = '11111111-1111-4111-8111-111111111111';
+
 function commentFixture(clipId = 1, overrides = {}) {
   return {
     id: 10,
@@ -20,6 +23,7 @@ function commentFixture(clipId = 1, overrides = {}) {
     userId: 7,
     username: 'alice',
     body: 'hello',
+    atMs: null,
     createdAt: '2026-07-18T09:30:00.000Z',
     ...overrides,
   };
@@ -197,6 +201,7 @@ test('HTTP statusをコメントUI向けreasonへ変換する', () => {
   assert.equal(getCommentsResponseReason(401), 'unauthorized');
   assert.equal(getCommentsResponseReason(403), 'forbidden');
   assert.equal(getCommentsResponseReason(404), 'not_found');
+  assert.equal(getCommentsResponseReason(429), 'rate_limited');
   assert.equal(getCommentsResponseReason(500), 'request_failed');
 });
 
@@ -219,6 +224,12 @@ test('successful GET and POST responses require their expected JSON shape', () =
     postResponseFixture(1),
     1
   ), true);
+  assert.equal(isValidCommentsSuccessResponse('POST', postResponseFixture(1, {
+    comment: commentFixture(1, {
+      atMs: 12_345,
+      futureField: { safely: 'ignored' },
+    }),
+  }), 1), true);
   assert.equal(isValidCommentsSuccessResponse('GET', getResponseFixture(1, {
     comments: [commentFixture(1, {
       userId: null,
@@ -269,7 +280,7 @@ test('comment responses require every field in the API contract', () => {
 
 test('malformed success JSON is returned as invalid_response', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'token',
   };
 
@@ -298,7 +309,7 @@ test('malformed success JSON is returned as invalid_response', async () => {
 
 test('GET accepts only 200 and POST accepts only 201', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'token',
   };
 
@@ -325,9 +336,63 @@ test('GET accepts only 200 and POST accepts only 201', async () => {
   });
 });
 
+test('429 is returned as a deterministic rate limit rejection', async () => {
+  const state = {
+    extensionInstanceId: INSTANCE_ID,
+    extensionAuthToken: 'token',
+    extensionLinked: true,
+  };
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => jsonResponse(429, {
+      message: 'Comment rate limit exceeded',
+      code: 'COMMENT_RATE_LIMITED',
+    }),
+  }, async () => {
+    assert.deepEqual(await postClipComment({ clipId: 1, body: 'hello' }), {
+      ok: false,
+      reason: 'rate_limited',
+      status: 429,
+      message: 'Comment rate limit exceeded',
+      code: 'COMMENT_RATE_LIMITED',
+    });
+  });
+
+  assert.equal(state.extensionAuthToken, 'token');
+  assert.equal(state.extensionLinked, true);
+});
+
+test('comments heal an invalid stored instance ID before any fetch', async () => {
+  const state = {
+    extensionInstanceId: 'corrupted-id',
+    extensionAuthToken: 'token',
+    extensionLinked: true,
+  };
+  let fetchCalls = 0;
+
+  await withCommentRequestMocks({
+    state,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('fetch must not run');
+    },
+  }, async () => {
+    assert.deepEqual(await fetchClipComments({ clipId: 1 }), {
+      ok: false,
+      reason: 'missing_token',
+    });
+  });
+
+  assert.equal(fetchCalls, 0);
+  assert.notEqual(state.extensionInstanceId, 'corrupted-id');
+  assert.equal(Object.hasOwn(state, 'extensionAuthToken'), false);
+  assert.equal(state.extensionLinked, false);
+});
+
 test('a stale 401 does not clear a newly stored auth token', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'old-token',
     extensionTokenExpiresAt: '2099-01-01T00:00:00.000Z',
     extensionLinked: true,
@@ -353,7 +418,7 @@ test('a stale 401 does not clear a newly stored auth token', async () => {
 
 test('a 401 for the current token clears auth state', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'current-token',
     extensionTokenExpiresAt: '2099-01-01T00:00:00.000Z',
     extensionTokenRefreshBackoff: { failureCount: 1 },
@@ -376,7 +441,7 @@ test('a 401 for the current token clears auth state', async () => {
 
 test('a re-link queued during an old-token 401 is saved after the clear', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'old-token',
     extensionLinked: true,
   };
@@ -399,7 +464,7 @@ test('a re-link queued during an old-token 401 is saved after the clear', async 
     await fetchStarted;
 
     const savePromise = saveExtensionAuthTokenInBackground({
-      extensionInstanceId: 'instance-id',
+      extensionInstanceId: INSTANCE_ID,
       extensionAuthToken: 'new-token',
       expiresAt: '2099-01-01T00:00:00.000Z',
     });
@@ -422,7 +487,7 @@ test('a re-link queued during an old-token 401 is saved after the clear', async 
 
 test('a re-link queued first is visible to the following comments request', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'old-token',
     extensionLinked: true,
   };
@@ -436,7 +501,7 @@ test('a re-link queued first is visible to the following comments request', asyn
     },
   }, async () => {
     const savePromise = saveExtensionAuthTokenInBackground({
-      extensionInstanceId: 'instance-id',
+      extensionInstanceId: INSTANCE_ID,
       extensionAuthToken: 'new-token',
     });
     const commentsPromise = fetchClipComments({ clipId: 1 });
@@ -455,7 +520,7 @@ test('a re-link queued first is visible to the following comments request', asyn
 
 test('a stalled comments request is aborted and returned as timeout', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'token',
   };
   const originalSetTimeout = globalThis.setTimeout;
@@ -497,9 +562,52 @@ test('a stalled comments request is aborted and returned as timeout', async () =
   }
 });
 
+test('a completed comments response is not timed out only because the wall clock crossed the deadline', async () => {
+  const state = {
+    extensionInstanceId: INSTANCE_ID,
+    extensionAuthToken: 'token',
+  };
+  const originalDateNow = Date.now;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  let now = 1_000;
+  let timeoutCallback;
+
+  Date.now = () => now;
+  globalThis.setTimeout = (callback) => {
+    timeoutCallback = callback;
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  try {
+    await withCommentRequestMocks({
+      state,
+      fetchImpl: async (_url, options) => ({
+        status: 200,
+        json: async () => {
+          assert.equal(options.signal.aborted, false);
+          now += COMMENTS_REQUEST_TIMEOUT_MS + 1;
+          return getResponseFixture(1);
+        },
+      }),
+    }, async () => {
+      assert.deepEqual(
+        await fetchClipComments({ clipId: 1 }),
+        getResponseFixture(1)
+      );
+      assert.equal(typeof timeoutCallback, 'function');
+    });
+  } finally {
+    Date.now = originalDateNow;
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
+});
+
 test('the comments deadline includes time waiting for the exclusive queue', async () => {
   const state = {
-    extensionInstanceId: 'instance-id',
+    extensionInstanceId: INSTANCE_ID,
     extensionAuthToken: 'token',
   };
   const originalSetTimeout = globalThis.setTimeout;

@@ -8,9 +8,10 @@ import { getApiEndpoint } from './../api.js';
 import {
   clearAutoNavigation,
   closeMemoSidebar,
+  createElementWait,
   detectService,
   handleClipTransition,
-  isAutoNavigation,
+  handleOwnedPlaybackRouteChange,
   markAutoNavigation,
   markExtUi,
   MEMO_SIDEBAR_ID,
@@ -98,7 +99,9 @@ function initializeNetflixPlayback() {
   let activePlaylistQueue = null;
   let activePlaylistOrder = null;
   let playbackGeneration = 0;
+  let cancelPendingVideoWait = null;
   let removePendingMetadataListener = null;
+  let removeVideoErrorListener = null;
 
   function applyPlaybackContext(context, ownerNonce) {
     setPlaybackContext(context);
@@ -146,29 +149,44 @@ function initializeNetflixPlayback() {
     activePlaybackOwnerNonce = null;
     playbackLocation = null;
     playbackGeneration += 1;
+    clearAutoNavigation();
     clearPlaybackContext();
     closeCommentPanel();
     releasePlaybackOwnership(ownerNonce);
 
-    stopClipEndMonitor?.();
-    stopClipEndMonitor = null;
-    removePendingMetadataListener?.();
-    removePendingMetadataListener = null;
-    if (countdownIntervalId !== null) {
-      clearInterval(countdownIntervalId);
-      countdownIntervalId = null;
-    }
-    stopUIWarmer();
+    stopPlaybackRuntime();
     clipData = null;
     activePlaylistQueue = null;
     activePlaylistOrder = null;
   }
 
+  function stopPlaybackRuntime() {
+    cancelPendingVideoWait?.();
+    cancelPendingVideoWait = null;
+    stopClipEndMonitor?.();
+    stopClipEndMonitor = null;
+    removePendingMetadataListener?.();
+    removePendingMetadataListener = null;
+    removeVideoErrorListener?.();
+    removeVideoErrorListener = null;
+    if (countdownIntervalId !== null) {
+      clearInterval(countdownIntervalId);
+      countdownIntervalId = null;
+    }
+    stopUIWarmer();
+  }
+
   function handlePlaybackRouteChange(nextUrl) {
     const resolvedUrl = routeIdentity(nextUrl || location.href);
-    if (!activePlaybackOwnerNonce || resolvedUrl === playbackLocation) return;
-    if (isAutoNavigation()) return;
-    deactivatePlaybackContext();
+    handleOwnedPlaybackRouteChange({
+      ownerNonce: activePlaybackOwnerNonce,
+      currentRoute: playbackLocation,
+      nextRoute: resolvedUrl,
+      onAutoNavigation: (route) => {
+        playbackLocation = route;
+      },
+      onManualNavigation: deactivatePlaybackContext,
+    });
   }
 
   clearAutoNavigation();
@@ -263,7 +281,7 @@ function initializeNetflixPlayback() {
             startTime = videoPlayer.currentTime;
           }
         } catch (error) {
-          console.error(error);
+          console.error('[Clip] recording action failed');
           alert(error.message);
           resetRecordState();
         }
@@ -300,7 +318,6 @@ function initializeNetflixPlayback() {
       window.addEventListener("historyChange", (e) => {
         resetRecordState();
         handlePlaybackRouteChange(e.detail?.url);
-        chrome.runtime.sendMessage({ type: "HISTORY_CHANGE", data: e.detail });
       });
 
       function resetRecordState() {
@@ -559,9 +576,9 @@ function initializeNetflixPlayback() {
         return;
       }
       renderClipList(container, { items, onSelect: (clipId) => selectClip(clipId) });
-    } catch (err) {
+    } catch {
       container.textContent = "データの取得に失敗しました。";
-      console.error("API取得失敗:", err);
+      console.error("API取得に失敗しました");
     }
   }
 
@@ -601,7 +618,7 @@ function initializeNetflixPlayback() {
         openClip: (selectedClip) => redirectToClip(selectedClip, ownerNonce)
       });
     } catch (err) {
-      console.error("クリップ選択処理でエラー:", err);
+      console.error("クリップ選択処理でエラーが発生しました");
       const unsupported = err?.message?.includes('invalid_service');
       window.alert(
         unsupported
@@ -658,30 +675,35 @@ function initializeNetflixPlayback() {
       title: snapshot.clip.title,
       clipId: snapshot.clip.clipId ?? snapshot.clip.id
     };
-    console.info('[Clip] loaded:', clipData);
+    console.info('[Clip] loaded');
     return true;
   }
 
-  function waitForVideoElement() {
-    return new Promise(resolve => {
-      const existing = document.querySelector('video');
-      if (existing) return resolve(existing);
-      const observer = new MutationObserver(() => {
-        const v = document.querySelector('video');
-        if (v) { observer.disconnect(); resolve(v); }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-    });
+  async function waitForVideoElement(generation) {
+    cancelPendingVideoWait?.();
+    const wait = createElementWait('video');
+    cancelPendingVideoWait = wait.cancel;
+    try {
+      const player = await wait.promise;
+      return generation === playbackGeneration ? player : null;
+    } finally {
+      if (cancelPendingVideoWait === wait.cancel) {
+        cancelPendingVideoWait = null;
+      }
+    }
   }
 
   async function init(session) {
     try {
       const loaded = loadClipFromSession(session);
       if (!loaded) return;
-      videoPlayer = await waitForVideoElement();
+      const generation = playbackGeneration;
+      const player = await waitForVideoElement(generation);
+      if (!player || generation !== playbackGeneration || !clipData) return;
+      videoPlayer = player;
       setupPlayer("clip");
-    } catch (err) {
-      console.error('[Clip] Initialization failed:', err);
+    } catch {
+      console.error('[Clip] Initialization failed');
     }
   }
 
@@ -711,7 +733,10 @@ function initializeNetflixPlayback() {
         endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
         title:     currentClip.clipname
       };
-      videoPlayer = await waitForVideoElement();
+      const generation = playbackGeneration;
+      const player = await waitForVideoElement(generation);
+      if (!player || generation !== playbackGeneration || !clipData) return;
+      videoPlayer = player;
       setupPlayer("playlist");
   }
 
@@ -779,7 +804,6 @@ function initializeNetflixPlayback() {
       },
 
       onDifferentUrl: async () => {
-        markAutoNavigation("playlist");
         const targetUrl = buildServiceUrl(
           next.service,
           next.url,
@@ -799,6 +823,15 @@ function initializeNetflixPlayback() {
           deactivatePlaybackContext();
           return;
         }
+        const marked = markAutoNavigation({
+          ownerNonce: activePlaybackOwnerNonce,
+          expectedRoute: routeIdentity(url),
+          reason: 'playlist',
+        });
+        if (!marked) {
+          deactivatePlaybackContext();
+          return;
+        }
         setTimeout(() => { window.location.href = url; }, 150);
       }
     });
@@ -812,9 +845,15 @@ function initializeNetflixPlayback() {
     const start = Number(clipData?.startTime);
 
     if (!Number.isFinite(end) || !Number.isFinite(start)) {
-      console.warn("[Clip] clipDataの時間が不正です:", clipData);
+      console.warn("[Clip] clipDataの時間が不正です");
       return;
     }
+
+    // A replacement player can already have metadata while the previous
+    // element is still waiting for it. Remove that stale listener before the
+    // ready-state branch so it cannot start an obsolete monitor later.
+    removePendingMetadataListener?.();
+    removePendingMetadataListener = null;
 
     const setupGeneration = playbackGeneration;
     const onReady = () => {
@@ -827,7 +866,6 @@ function initializeNetflixPlayback() {
     if (videoPlayer.readyState >= 1) {
       onReady();
     } else {
-      removePendingMetadataListener?.();
       const metadataPlayer = videoPlayer;
       const removeMetadataListener = () =>
         metadataPlayer.removeEventListener('loadedmetadata', onReady);
@@ -835,7 +873,17 @@ function initializeNetflixPlayback() {
       metadataPlayer.addEventListener('loadedmetadata', onReady, { once: true });
     }
 
-    videoPlayer.addEventListener('error', e => console.error('[Video] error:', e));
+    removeVideoErrorListener?.();
+    const errorPlayer = videoPlayer;
+    const onVideoError = () => console.error('[Video] playback error');
+    const removeErrorListener = () => {
+      errorPlayer.removeEventListener('error', onVideoError);
+      if (removeVideoErrorListener === removeErrorListener) {
+        removeVideoErrorListener = null;
+      }
+    };
+    errorPlayer.addEventListener('error', onVideoError);
+    removeVideoErrorListener = removeErrorListener;
   }
 
   function monitorClipEnd(end, start, mode /* "clip" | "playlist" */) {
@@ -852,7 +900,7 @@ function initializeNetflixPlayback() {
 
     function onTimeUpdate() {
       if (monitoredPlayer.currentTime + EPSILON >= end) {
-        console.info("[Clip] Reached end:", clipData?.title || "unknown");
+        console.info("[Clip] Reached end");
         stopMonitor();
         clearInterval(countdownIntervalId);
 
@@ -941,6 +989,7 @@ function initializeNetflixPlayback() {
   // ---------------------------------------------------------------------------
   window.addEventListener("beforeunload", () => {
     playbackGeneration += 1;
+    stopPlaybackRuntime();
     clearPlaybackContext();
     closeCommentPanel();
   });

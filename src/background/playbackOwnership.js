@@ -35,7 +35,16 @@ const SNAPSHOT_KEYS = [
 ];
 
 function isNonce(value) {
-  return typeof value === 'string' && value.length >= 8 && value.length <= 200;
+  return typeof value === 'string' &&
+    /^[a-z\d-]{8,200}$/i.test(value);
+}
+
+function getOwnEntry(record, key) {
+  return key !== undefined &&
+    key !== null &&
+    Object.hasOwn(record, key)
+    ? record[key]
+    : undefined;
 }
 
 function getOwnerNonceFromUrl(value) {
@@ -83,6 +92,7 @@ export function createPlaybackOwnershipManager({
   now = () => Date.now(),
 }) {
   let operation = Promise.resolve();
+  const NO_LOCAL_UPDATE = Symbol('no-local-update');
 
   const exclusive = (task) => {
     const next = operation.then(task, task);
@@ -97,22 +107,27 @@ export function createPlaybackOwnershipManager({
     const pending = raw?.pending && typeof raw.pending === 'object' ? raw.pending : {};
     const currentTime = now();
     const retainedPending = Object.fromEntries(
-      Object.entries(pending).filter(([, handoff]) =>
-        Number(handoff?.expiresAt ?? handoff) > currentTime
-      )
+      Object.entries(pending)
+        .filter(([, handoff]) =>
+          Number(handoff?.expiresAt ?? handoff) > currentTime
+        )
+        .map(([nonce, handoff]) => [
+          nonce,
+          handoff && typeof handoff === 'object' ? { ...handoff } : handoff,
+        ])
     );
     const registry = {
-      active: { ...active },
+      active: Object.fromEntries(
+        Object.entries(active).map(([tabId, entry]) => [
+          tabId,
+          entry && typeof entry === 'object' ? { ...entry } : entry,
+        ])
+      ),
       pending: retainedPending,
       revision: Number.isSafeInteger(raw?.revision) && raw.revision >= 0
         ? raw.revision
         : 0,
     };
-    if (Object.keys(retainedPending).length !== Object.keys(pending).length) {
-      await writeRegistry(registry);
-      await reconcileGlobalOwner(registry);
-      await clearGlobalIfIdle(registry);
-    }
     return registry;
   }
 
@@ -120,45 +135,89 @@ export function createPlaybackOwnershipManager({
     await sessionStorage.set({ [PLAYBACK_REGISTRY_STORAGE_KEY]: registry });
   }
 
-  async function clearGlobalIfIdle(registry) {
-    if (
-      Object.keys(registry.active).length === 0 &&
-      Object.keys(registry.pending).length === 0
-    ) {
-      const current = await localStorage.get(SNAPSHOT_KEYS);
-      const alreadyReset = SNAPSHOT_KEYS.every((key) => {
-        const value = current?.[key];
-        const resetValue = GLOBAL_PLAYBACK_RESET[key];
-        return value === resetValue || (value === undefined && resetValue !== undefined);
-      });
-      if (!alreadyReset) await localStorage.set(GLOBAL_PLAYBACK_RESET);
-      return true;
+  function isRegistryIdle(registry) {
+    return Object.keys(registry.active).length === 0 &&
+      Object.keys(registry.pending).length === 0;
+  }
+
+  async function captureStorageValues(area, keys) {
+    const stored = await area.get(keys);
+    return Object.fromEntries(
+      keys
+        .filter(
+          (key) => Object.hasOwn(stored || {}, key) && stored[key] !== undefined
+        )
+        .map((key) => [key, stored[key]])
+    );
+  }
+
+  async function restoreStorageValues(area, keys, previous) {
+    const values = Object.fromEntries(
+      keys
+        .filter((key) => Object.hasOwn(previous, key))
+        .map((key) => [key, previous[key]])
+    );
+    const missing = keys.filter((key) => !Object.hasOwn(previous, key));
+    if (Object.keys(values).length > 0) await area.set(values);
+    if (missing.length > 0) {
+      if (typeof area.remove !== 'function') {
+        throw new Error('Storage rollback is unavailable');
+      }
+      await area.remove(missing);
     }
-    return false;
   }
 
-  async function restoreLatestOwnedSnapshot(registry, removedNonce) {
-    const globalState = await localStorage.get(PLAYBACK_OWNER_STORAGE_KEY);
-    if (globalState?.[PLAYBACK_OWNER_STORAGE_KEY] !== removedNonce) return false;
-    const latest = latestOwnedSnapshot(registry);
-    if (!latest?.snapshot) return false;
-    await localStorage.set(latest.snapshot);
-    return true;
+  async function commitOwnershipState(registry, localUpdate = NO_LOCAL_UPDATE) {
+    if (localUpdate === NO_LOCAL_UPDATE) {
+      const registryKeys = [PLAYBACK_REGISTRY_STORAGE_KEY];
+      const previousRegistry = await captureStorageValues(
+        sessionStorage,
+        registryKeys
+      );
+      try {
+        await writeRegistry(registry);
+      } catch (error) {
+        await Promise.allSettled([
+          restoreStorageValues(sessionStorage, registryKeys, previousRegistry),
+        ]);
+        throw error;
+      }
+      return;
+    }
+
+    const registryKeys = [PLAYBACK_REGISTRY_STORAGE_KEY];
+    const localKeys = Object.keys(localUpdate);
+    const [previousRegistry, previousLocal] = await Promise.all([
+      captureStorageValues(sessionStorage, registryKeys),
+      captureStorageValues(localStorage, localKeys),
+    ]);
+
+    try {
+      await writeRegistry(registry);
+      await localStorage.set(localUpdate);
+    } catch (error) {
+      await Promise.allSettled([
+        restoreStorageValues(sessionStorage, registryKeys, previousRegistry),
+        restoreStorageValues(localStorage, localKeys, previousLocal),
+      ]);
+      throw error;
+    }
   }
 
-  async function reconcileGlobalOwner(registry) {
+  async function getReconciledLocalUpdate(registry) {
+    if (isRegistryIdle(registry)) return GLOBAL_PLAYBACK_RESET;
     const globalState = await localStorage.get(PLAYBACK_OWNER_STORAGE_KEY);
     const globalOwner = globalState?.[PLAYBACK_OWNER_STORAGE_KEY];
-    if (
-      Object.values(registry.active).some((entry) => entry?.nonce === globalOwner) ||
-      registry.pending[globalOwner]
-    ) {
-      return false;
-    }
-    const latest = latestOwnedSnapshot(registry);
-    if (!latest?.snapshot) return false;
-    await localStorage.set(latest.snapshot);
-    return true;
+    const ownerStillExists = Object.values(registry.active)
+      .some((entry) => entry?.nonce === globalOwner) ||
+      Boolean(getOwnEntry(registry.pending, globalOwner));
+    if (ownerStillExists) return NO_LOCAL_UPDATE;
+    return latestOwnedSnapshot(registry)?.snapshot || GLOBAL_PLAYBACK_RESET;
+  }
+
+  async function persistReconciledRegistry(registry) {
+    const localUpdate = await getReconciledLocalUpdate(registry);
+    await commitOwnershipState(registry, localUpdate);
   }
 
   function compareActiveRecency(a, b) {
@@ -209,8 +268,7 @@ export function createPlaybackOwnershipManager({
         revision: takeRevision(registry),
         updatedAt: now(),
       };
-      await localStorage.set(normalizedSnapshot);
-      await writeRegistry(registry);
+      await commitOwnershipState(registry, normalizedSnapshot);
       return {
         ok: true,
         context: normalizedContext,
@@ -222,6 +280,9 @@ export function createPlaybackOwnershipManager({
   function claim({ tabId, openerTabId, nonce, route }) {
     return exclusive(async () => {
       if (!Number.isInteger(tabId)) {
+        return { ok: false, reason: 'invalid_claim' };
+      }
+      if (nonce !== undefined && nonce !== null && !isNonce(nonce)) {
         return { ok: false, reason: 'invalid_claim' };
       }
 
@@ -243,14 +304,14 @@ export function createPlaybackOwnershipManager({
             }
           );
           if (eligiblePending.length > 1) {
-            await writeRegistry(registry);
+            await persistReconciledRegistry(registry);
             return { ok: false, reason: 'ambiguous_handoff' };
           }
           resolvedNonce = eligiblePending[0]?.[0];
         }
       }
       if (!isNonce(resolvedNonce)) {
-        await clearGlobalIfIdle(registry);
+        await persistReconciledRegistry(registry);
         return {
           ok: false,
           reason: 'handoff_not_found',
@@ -258,7 +319,7 @@ export function createPlaybackOwnershipManager({
         };
       }
       const existing = registry.active[tabKey];
-      const handoff = registry.pending[resolvedNonce];
+      const handoff = getOwnEntry(registry.pending, resolvedNonce);
       const sourceTabId = Number(handoff?.sourceTabId);
       const mayClaim =
         existing?.nonce === resolvedNonce ||
@@ -269,7 +330,7 @@ export function createPlaybackOwnershipManager({
             Number(handoff?.targetTabId) === tabId
           ));
       if (!mayClaim) {
-        await clearGlobalIfIdle(registry);
+        await persistReconciledRegistry(registry);
         return {
           ok: false,
           reason: 'handoff_not_found',
@@ -283,7 +344,7 @@ export function createPlaybackOwnershipManager({
         ? normalizeSnapshot(source?.snapshot, resolvedNonce, normalizedContext)
         : null;
       if (!normalizedContext || !normalizedSnapshot) {
-        await writeRegistry(registry);
+        await persistReconciledRegistry(registry);
         return { ok: false, reason: 'snapshot_mismatch' };
       }
 
@@ -296,12 +357,8 @@ export function createPlaybackOwnershipManager({
       if (claimRoute && !snapshotMatchesRoute(normalizedSnapshot, normalizedContext, claimRoute)) {
         if (existing?.nonce === resolvedNonce) {
           delete registry.active[tabKey];
-          await writeRegistry(registry);
-          await restoreLatestOwnedSnapshot(registry, existing.nonce);
-          await clearGlobalIfIdle(registry);
-        } else {
-          await writeRegistry(registry);
         }
+        await persistReconciledRegistry(registry);
         return {
           ok: false,
           reason: 'route_mismatch',
@@ -316,9 +373,7 @@ export function createPlaybackOwnershipManager({
         claimRoute !== existing.expectedRoute
       ) {
         delete registry.active[tabKey];
-        await writeRegistry(registry);
-        await restoreLatestOwnedSnapshot(registry, existing.nonce);
-        await clearGlobalIfIdle(registry);
+        await persistReconciledRegistry(registry);
         return {
           ok: false,
           reason: 'route_mismatch',
@@ -326,7 +381,6 @@ export function createPlaybackOwnershipManager({
         };
       }
 
-      await localStorage.set(normalizedSnapshot);
       registry.active[tabKey] = {
         nonce: resolvedNonce,
         context: normalizedContext,
@@ -338,7 +392,7 @@ export function createPlaybackOwnershipManager({
         updatedAt: now(),
       };
       delete registry.pending[resolvedNonce];
-      await writeRegistry(registry);
+      await commitOwnershipState(registry, normalizedSnapshot);
       return {
         ok: true,
         nonce: resolvedNonce,
@@ -366,7 +420,7 @@ export function createPlaybackOwnershipManager({
       const tabKey = String(tabId);
       const existing = registry.active[tabKey];
       if (existing?.nonce !== nonce) {
-        await writeRegistry(registry);
+        await persistReconciledRegistry(registry);
         return { ok: false, reason: 'not_owner' };
       }
 
@@ -389,7 +443,6 @@ export function createPlaybackOwnershipManager({
         return { ok: false, reason: 'snapshot_mismatch' };
       }
 
-      await localStorage.set(normalizedSnapshot);
       registry.active[tabKey] = {
         nonce,
         context: normalizedContext,
@@ -400,7 +453,7 @@ export function createPlaybackOwnershipManager({
         revision: takeRevision(registry),
         updatedAt: now(),
       };
-      await writeRegistry(registry);
+      await commitOwnershipState(registry, normalizedSnapshot);
       return {
         ok: true,
         context: normalizedContext,
@@ -419,12 +472,20 @@ export function createPlaybackOwnershipManager({
       const registry = await readRegistry();
       const existing = registry.active[String(tabId)];
       if (existing?.nonce !== nonce) {
-        await writeRegistry(registry);
+        await persistReconciledRegistry(registry);
         return { ok: false, reason: 'not_owner' };
+      }
+      if (!snapshotMatchesRoute(
+        existing.snapshot,
+        existing.context,
+        nextRoute
+      )) {
+        await persistReconciledRegistry(registry);
+        return { ok: false, reason: 'route_mismatch' };
       }
       existing.expectedRoute = nextRoute;
       existing.autoNavigationRoute = null;
-      await writeRegistry(registry);
+      await persistReconciledRegistry(registry);
       return { ok: true };
     });
   }
@@ -441,14 +502,14 @@ export function createPlaybackOwnershipManager({
           !Number.isInteger(handoff?.targetTabId)
       );
       if (eligible.length !== 1) {
-        await writeRegistry(registry);
+        await persistReconciledRegistry(registry);
         return {
           ok: false,
           reason: eligible.length > 1 ? 'ambiguous_handoff' : 'handoff_not_found',
         };
       }
       eligible[0].targetTabId = tabId;
-      await writeRegistry(registry);
+      await persistReconciledRegistry(registry);
       return { ok: true };
     });
   }
@@ -461,30 +522,33 @@ export function createPlaybackOwnershipManager({
       const existing = registry.active[tabKey];
       if (!existing) {
         const pendingNonce = getOwnerNonceFromUrl(url);
-        if (isNonce(pendingNonce) && registry.pending[pendingNonce]) {
-          if (registry.pending[pendingNonce].targetTabId !== tabId) {
-            registry.pending[pendingNonce].targetTabId = tabId;
-            await writeRegistry(registry);
+        const pending = isNonce(pendingNonce)
+          ? getOwnEntry(registry.pending, pendingNonce)
+          : null;
+        if (pending) {
+          if (pending.targetTabId !== tabId) {
+            pending.targetTabId = tabId;
           }
         }
+        await persistReconciledRegistry(registry);
         return { ok: true, released: false };
       }
       const nextRoute = normalizeRoute(url);
       if (nextRoute && nextRoute === existing.route) {
+        await persistReconciledRegistry(registry);
         return { ok: true, released: false };
       }
       if (nextRoute && nextRoute === existing.expectedRoute) {
         existing.route = nextRoute;
         existing.expectedRoute = null;
         existing.autoNavigationRoute = nextRoute;
-        await writeRegistry(registry);
+        await persistReconciledRegistry(registry);
         return { ok: true, released: false };
       }
 
       delete registry.active[tabKey];
-      await writeRegistry(registry);
-      await restoreLatestOwnedSnapshot(registry, existing.nonce);
-      const cleared = await clearGlobalIfIdle(registry);
+      await persistReconciledRegistry(registry);
+      const cleared = isRegistryIdle(registry);
       return { ok: true, released: true, cleared };
     });
   }
@@ -495,16 +559,11 @@ export function createPlaybackOwnershipManager({
       const registry = await readRegistry();
       const tabKey = String(tabId);
       const existing = registry.active[tabKey];
-      let removed = null;
       if (existing && isNonce(nonce) && existing.nonce === nonce) {
-        removed = existing;
         delete registry.active[tabKey];
       }
-      await writeRegistry(registry);
-      if (removed) {
-        await restoreLatestOwnedSnapshot(registry, removed.nonce);
-      }
-      const cleared = await clearGlobalIfIdle(registry);
+      await persistReconciledRegistry(registry);
+      const cleared = isRegistryIdle(registry);
       return { ok: true, cleared };
     });
   }
@@ -513,13 +572,9 @@ export function createPlaybackOwnershipManager({
     return exclusive(async () => {
       if (!Number.isInteger(tabId)) return { ok: false, reason: 'invalid_tab' };
       const registry = await readRegistry();
-      const existing = registry.active[String(tabId)];
       delete registry.active[String(tabId)];
-      await writeRegistry(registry);
-      if (existing) {
-        await restoreLatestOwnedSnapshot(registry, existing.nonce);
-      }
-      const cleared = await clearGlobalIfIdle(registry);
+      await persistReconciledRegistry(registry);
+      const cleared = isRegistryIdle(registry);
       return { ok: true, cleared };
     });
   }
@@ -527,9 +582,8 @@ export function createPlaybackOwnershipManager({
   function cleanupExpired() {
     return exclusive(async () => {
       const registry = await readRegistry();
-      await writeRegistry(registry);
-      await reconcileGlobalOwner(registry);
-      const cleared = await clearGlobalIfIdle(registry);
+      await persistReconciledRegistry(registry);
+      const cleared = isRegistryIdle(registry);
       return { ok: true, cleared };
     });
   }
@@ -537,8 +591,7 @@ export function createPlaybackOwnershipManager({
   function reset() {
     return exclusive(async () => {
       const registry = { active: {}, pending: {}, revision: 0 };
-      await writeRegistry(registry);
-      await localStorage.set(GLOBAL_PLAYBACK_RESET);
+      await commitOwnershipState(registry, GLOBAL_PLAYBACK_RESET);
       return { ok: true };
     });
   }

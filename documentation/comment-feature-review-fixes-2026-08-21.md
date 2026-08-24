@@ -333,7 +333,7 @@ Disney+でも`src/util/history_change.js`を`document_start`のMAIN world conten
 - [x] 不正データは一部採用せず、handoff全体を拒否する方針に統一する
 - [x] 拒否時のconsole warningとユーザー通知方針を決める
 
-完了条件: localhost site側の実データ例と矛盾しない入力契約が文章化されている。  
+完了条件: localhost site側の実データ例と矛盾しない入力契約が文章化されている。
 完了資料: [Localhost playback bridge input contract v1](./localhost-playback-bridge-contract-v1.md)
 
 ### Phase 2: localhost bridgeを修正する
@@ -522,3 +522,40 @@ Disney+でも`src/util/history_change.js`を`document_start`のMAIN world conten
 仕様判断として、playback bridge v1はNetflix / Disney+限定を維持する。Prime / YouTubeを含むplaylistの部分再生互換は今回のmerge blockerに含めず、必要なら契約versionを更新する別変更として扱う。
 
 site側の`service` cookie追加はローカル作業ツリーにのみ存在するため、site commit・pushとremote branch包含確認が完了するまではmerge blockerとして残る。
+
+## 13. PR #129詳細再レビュー（2026-08-24）
+
+Phase 6以降のPR全差分を、`documentation/pr-129-detailed-review-plan-2026-08-23.md`のP-01〜P-10に沿って再監査した。本節はPhase 6に記録した98/98件および「新たなコード上のmerge blockerなし」という時点情報を、追加修正後の結果で更新する。
+
+追加で修正した主な不変条件違反:
+
+- Netflix / Disney+のauto-navigation markerをtab-localなnonce・正規化route・有効期限へ束縛し、一度だけconsumeするよう変更した。共有`localStorage`やclaim後の無条件boolean cacheを使わない。
+- syncの200 responseを`{ok:true, acceptedItemIds}`へ厳密化し、不正responseでpending clipを削除しない。enqueueとaccepted item削除はbackgroundの短い専用排他区間へ集約し、interleavingで新規clipを消失させない。
+- syncの400 responseが対象item IDを示さない場合はattempted batchを全件保持し、明示されたIDだけを削除する。productionの一般400でvalid clipまで失わない。
+- playback ownershipのnonce validationとown-property lookupを強化し、session/localの二重書込みを補償transaction化した。明示的な不正nonceはlegacy claimへfallbackせず、PREPARE routeは現在のowned snapshotと一致する場合だけ受理する。
+- instance IDとauth tokenを共有validatorで検証し、破損storageはfetch前に修復またはfail closedする。stale 401、malformed refresh success、unsafe header tokenで現在の連携状態を壊さない。
+- commentsの429を`rate_limited`へ固定し、完了済みresponseを壁時計だけでtimeout扱いしない。POST中のauth storage changeは成功response処理後までrefreshを延期する。
+- memo DOMの外部切断、Netflix video待機Observer、metadata/error listener、background fire-and-forget rejectionを明示的にcleanupする。
+- raw location URL、nonce付きURL、background responseをconsoleへ出す不要なloggingを除去した。
+- Netflix history hookのisolated-world重複登録を除去し、MAIN-world注入へ一本化した。これによりnative `popstate`の二重通知を防ぐ。
+
+追加した決定的な回帰試験には、syncのqueue RMW競合、storage片側write failure、malicious nonce、stale 401/relink、invalid instance ID、malformed refresh/sync response、POST pending中のauth変更、detached memo、route teardown中のvideo wait、およびMAIN-world history hookのpush/replace/popstateが含まれる。
+
+2026-08-24時点の自動検証:
+
+- extension: `npm test` 143/143、`npm run lint` 37 files pass、`npm run build`成功（5 bundles）、worktree `git diff --check`成功
+- localhost site: 分離対象7ファイルを含む現作業ツリーで`npm run codex:quick`成功（tests 141/141、lint、typecheck、Next type generation）
+
+site側の必要差分は、ユーザー判断によりPR #62へ追加しない。`origin/develop`起点の独立PRへ次の9ファイルを分離し、確定remote SHAを本資料へ追記する。追加監査で、自動linkの並行実行をinstance単位でcoalesceする修正と、明示port/credentials付き再生URLをpopup前に拒否する修正も同PRの必須項目とした。
+
+- `src/app/layout.tsx`
+- `src/components/ExtensionLinker.tsx`
+- `src/components/ExtensionPlaybackHandoffStatus.tsx`
+- `src/lib/extension/client.ts`
+- `src/lib/clips/playback.ts`
+- `tests/clips/playback.test.mjs`
+- `tests/extension/extension-client.test.mjs`
+- `tests/extension/extension-linker-mount.test.mjs`
+- `tests/extension/extension-handoff-status.test.mjs`
+
+残るmerge gateは、独立site PRのremote SHA確定、修正後extensionでの最終Chrome smoke、commit後の`git diff --check origin/develop...HEAD`、および最終HEADのCIである。友人reviewerのapprovalとGitHub review thread操作は、ユーザー指示により今回の作業範囲から除外する。

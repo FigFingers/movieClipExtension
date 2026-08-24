@@ -32,6 +32,28 @@ class FakeEventTarget {
   }
 }
 
+class FakeMutationObserver {
+  static instances = [];
+
+  constructor(callback) {
+    this.callback = callback;
+    this.connected = false;
+    FakeMutationObserver.instances.push(this);
+  }
+
+  observe() {
+    this.connected = true;
+  }
+
+  disconnect() {
+    this.connected = false;
+  }
+
+  trigger() {
+    if (this.connected) this.callback([]);
+  }
+}
+
 class FakeElement extends FakeEventTarget {
   constructor(tagName, ownerDocument) {
     super();
@@ -45,11 +67,19 @@ class FakeElement extends FakeEventTarget {
       width: '',
     };
     this.dataset = {};
+    this.attributes = new Map();
     this.className = '';
     this.id = '';
     this.textContent = '';
     this.value = '';
     this.onclick = null;
+  }
+
+  get isConnected() {
+    return (
+      this === this.ownerDocument.body ||
+      this.parentElement?.isConnected === true
+    );
   }
 
   append(...children) {
@@ -66,6 +96,14 @@ class FakeElement extends FakeEventTarget {
 
   contains(target) {
     return target === this || this.children.some((child) => child.contains(target));
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
   }
 
   focus() {
@@ -125,13 +163,16 @@ class FakeDocument extends FakeEventTarget {
   }
 }
 
-function createKeyboardEvent(target) {
+function createKeyboardEvent(
+  target,
+  { key = 'Enter', isComposing = false, repeat = false } = {},
+) {
   return {
     type: 'keydown',
     target,
-    key: 'Enter',
-    isComposing: false,
-    repeat: false,
+    key,
+    isComposing,
+    repeat,
     defaultPrevented: false,
     propagationStopped: false,
     immediatePropagationStopped: false,
@@ -181,6 +222,8 @@ function installDom() {
   globalThis.document = document;
   globalThis.window = window;
   globalThis.location = { href: 'https://www.netflix.com/watch/1' };
+  FakeMutationObserver.instances = [];
+  globalThis.MutationObserver = FakeMutationObserver;
   return { document, window };
 }
 
@@ -371,4 +414,76 @@ test('opening a memo after the Netflix clip list preserves the true player width
 
   closeMemoSidebar();
   assert.equal(player.style.width, '65%');
+});
+
+test('site-side removal tears down memo listeners and restores the exact width', async () => {
+  const { document, window } = installDom();
+  const { closeMemoSidebar, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  player.style.width = '';
+  const save = createDeferred();
+  let playCount = 0;
+  player.play = () => {
+    playCount += 1;
+  };
+  let closeCount = 0;
+
+  const sidebar = openMemoSidebar({
+    videoPlayer: player,
+    onSave: () => save.promise,
+    onClose: () => {
+      closeCount += 1;
+    },
+  });
+  const mountObserver = FakeMutationObserver.instances.at(-1);
+
+  assert.equal(mountObserver?.connected, true);
+  sidebarControls(sidebar).saveButton.onclick();
+  sidebar.remove();
+  mountObserver.trigger();
+
+  assert.equal(player.style.width, '');
+  assert.equal(window.listeners.get('keydown')?.size, 0);
+  assert.equal(document.listeners.get('focusin')?.size, 0);
+  assert.equal(mountObserver.connected, false);
+  assert.equal(closeCount, 1);
+  assert.equal(closeMemoSidebar(), false);
+
+  save.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(playCount, 0);
+});
+
+test('memo Escape respects IME composition and restores focus on close', async () => {
+  const { document, window } = installDom();
+  const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  const trigger = document.createElement('button');
+  document.body.appendChild(trigger);
+  trigger.focus();
+
+  const sidebar = openMemoSidebar({ videoPlayer: player });
+  const controls = sidebarControls(sidebar);
+
+  assert.equal(sidebar.getAttribute('role'), 'dialog');
+  assert.equal(
+    sidebar.getAttribute('aria-labelledby'),
+    `${MEMO_SIDEBAR_ID}-title`,
+  );
+  assert.equal(controls.closeButton.getAttribute('aria-label'), '録画メモを閉じる');
+
+  const composingEscape = createKeyboardEvent(controls.nameInput, {
+    key: 'Escape',
+    isComposing: true,
+  });
+  window.dispatch(composingEscape);
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), sidebar);
+  assert.equal(composingEscape.defaultPrevented, false);
+  assert.equal(composingEscape.immediatePropagationStopped, true);
+
+  const escape = createKeyboardEvent(controls.nameInput, { key: 'Escape' });
+  window.dispatch(escape);
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+  assert.equal(escape.defaultPrevented, true);
+  assert.equal(document.activeElement, trigger);
 });

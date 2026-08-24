@@ -50,8 +50,8 @@ export function appendStartTimeParam(baseUrl, paramKey, startTime) {
     const urlObj = new URL(baseUrl);
     urlObj.searchParams.set(paramKey, String(startTime));
     return urlObj.toString();
-  } catch (error) {
-    console.warn("⚠️ URL 解析に失敗しました:", baseUrl, error);
+  } catch {
+    console.warn("⚠️ URL 解析に失敗しました");
     return baseUrl;
   }
 }

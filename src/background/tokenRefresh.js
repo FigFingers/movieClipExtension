@@ -6,7 +6,13 @@ import {
   storageRemove,
   clearExtensionAuthState,
 } from './../shared/storage.js';
-import { runExclusive } from './sync.js';
+import {
+  isValidExtensionInstanceId,
+  isValidExtensionAuthToken,
+  normalizeExtensionTokenExpiry,
+} from './../shared/authValidation.js';
+import { runExclusive } from './authMutex.js';
+import { getOrCreateInstanceIdWhileExclusive } from './instanceId.js';
 import { fetchJsonWithTimeout } from './request.js';
 
 // トークンはサーバ発行の不透明トークン(JWT ではない)。期限はサーバが link/refresh 応答の
@@ -69,6 +75,23 @@ function clearRefreshBackoff() {
   return storageRemove([STORAGE_KEYS.extensionTokenRefreshBackoff]);
 }
 
+function normalizeRefreshSuccess(data) {
+  const expiresAt = normalizeExtensionTokenExpiry(data?.expiresAt);
+  if (
+    data?.ok !== true
+    || !isValidExtensionAuthToken(data.extensionAuthToken)
+    || expiresAt === null
+    || Date.parse(expiresAt) <= Date.now()
+  ) {
+    return null;
+  }
+
+  return {
+    extensionAuthToken: data.extensionAuthToken,
+    expiresAt,
+  };
+}
+
 export function checkAndRefreshToken() {
   return runExclusive(performCheckAndRefreshToken);
 }
@@ -77,13 +100,25 @@ async function performCheckAndRefreshToken() {
   const stored = await storageGet([
     STORAGE_KEYS.extensionAuthToken,
     STORAGE_KEYS.extensionInstanceId,
+    STORAGE_KEYS.extensionLinked,
     STORAGE_KEYS.extensionTokenExpiresAt,
     STORAGE_KEYS.extensionTokenRefreshBackoff,
   ]);
   const token = stored[STORAGE_KEYS.extensionAuthToken];
   const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
 
-  if (!token || !extensionInstanceId) {
+  if (!isValidExtensionInstanceId(extensionInstanceId)) {
+    await getOrCreateInstanceIdWhileExclusive();
+    return { ok: true, skipped: true, reason: 'not_linked' };
+  }
+
+  if (!isValidExtensionAuthToken(token)) {
+    if (
+      token !== undefined
+      || stored[STORAGE_KEYS.extensionLinked] === true
+    ) {
+      await clearExtensionAuthState();
+    }
     return { ok: true, skipped: true, reason: 'not_linked' };
   }
 
@@ -136,14 +171,21 @@ async function performCheckAndRefreshToken() {
   }
   const { response, data } = request;
 
-  if (response.status === 200 && typeof data?.extensionAuthToken === 'string') {
+  if (response.status === 200) {
+    const refreshed = normalizeRefreshSuccess(data);
+    if (!refreshed) {
+      console.warn('[extension-sync] malformed token refresh response; keeping current token');
+      await recordRefreshFailure(token, response.status);
+      return { ok: false, reason: 'invalid_response' };
+    }
+
     await storageSet({
-      [STORAGE_KEYS.extensionAuthToken]: data.extensionAuthToken,
-      [STORAGE_KEYS.extensionTokenExpiresAt]: data.expiresAt || null,
+      [STORAGE_KEYS.extensionAuthToken]: refreshed.extensionAuthToken,
+      [STORAGE_KEYS.extensionTokenExpiresAt]: refreshed.expiresAt,
       [STORAGE_KEYS.extensionLinked]: true,
     });
     await clearRefreshBackoff();
-    console.log('[extension-sync] token refreshed', { expiresAt: data.expiresAt });
+    console.log('[extension-sync] token refreshed', { expiresAt: refreshed.expiresAt });
     return { ok: true, refreshed: true };
   }
 
