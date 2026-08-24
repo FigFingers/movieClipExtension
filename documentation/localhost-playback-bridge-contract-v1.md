@@ -1,7 +1,7 @@
 # Localhost playback bridge input contract v1
 
 Status: Phase 1確定・Phase 2実装済み・Phase 4ローカル検証済み（site依存commit待ち）
-Date: 2026-08-21  
+Date: 2026-08-21
 Scope: `http://localhost:3000` / `http://127.0.0.1:3000` から拡張へ渡す単体clip・playlist再生handoff
 
 ## 1. 目的

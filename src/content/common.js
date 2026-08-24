@@ -5,6 +5,7 @@ import {
 
 export const MEMO_SIDEBAR_ID = 'nf-memo-sidebar';
 export const AUTO_NAVIGATION_KEY = 'extAutoNavigation';
+export const AUTO_NAVIGATION_TTL_MS = 15000;
 export const CLOSE_COMMENT_PANEL_EVENT = 'ext:close-comment-panel';
 
 // 表示中サイドバーの状態。再オープン時に元のプレイヤー幅を引き継ぎつつ、
@@ -33,7 +34,10 @@ export function closeMemoSidebar() {
   const player =
     document.querySelector('.watch-video--player-view') ||
     document.querySelector('video')?.parentElement;
-  if (player) player.style.width = originalWidth || '100%';
+  if (player) {
+    player.style.width =
+      originalWidth === undefined ? '100%' : originalWidth;
+  }
   return true;
 }
 
@@ -114,6 +118,7 @@ export function openMemoSidebar({
     document.querySelector('.watch-video--player-view') ||
     document.querySelector('video')?.parentElement;
   if (!player) return null;
+  const focusTarget = document.activeElement;
 
   requestCloseCommentPanel();
 
@@ -131,7 +136,7 @@ export function openMemoSidebar({
       : player.style.width;
   if (previousSession) {
     previousSession.supersede();
-    previousSession.close({ notify: false });
+    previousSession.close({ notify: false, restoreFocus: false });
   }
   document.getElementById(MEMO_SIDEBAR_ID)?.remove();
 
@@ -140,12 +145,16 @@ export function openMemoSidebar({
 
   const sb = document.createElement('div');
   sb.id = MEMO_SIDEBAR_ID;
+  sb.setAttribute('role', 'dialog');
+  sb.setAttribute('aria-modal', 'false');
+  sb.setAttribute('aria-labelledby', `${MEMO_SIDEBAR_ID}-title`);
   sb.style.cssText = `
     position:fixed;top:0;right:0;width:${sidebarPct}%;
     height:100%;background:rgba(0,0,0,.85);padding:10px;
     box-sizing:border-box;z-index:9999;display:flex;flex-direction:column;gap:8px;`;
 
   let removeKeyGuard;
+  let removeMountObserver;
   let session;
   let closed = false;
   let superseded = false;
@@ -153,22 +162,29 @@ export function openMemoSidebar({
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
   const title = document.createElement('strong');
+  title.id = `${MEMO_SIDEBAR_ID}-title`;
   title.textContent = sidebarTitle;
   title.style.color = 'white';
   const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
   closeBtn.textContent = '×';
+  closeBtn.setAttribute('aria-label', '録画メモを閉じる');
   closeBtn.style.cssText = 'background:red;color:#fff;border:none;cursor:pointer;';
-  const closeSidebar = ({ notify = true } = {}) => {
+  const closeSidebar = ({ notify = true, restoreFocus = true } = {}) => {
     if (closed) return;
     closed = true;
     removeKeyGuard?.();
+    removeMountObserver?.();
     // 保存完了が遅れても、現在表示中のセッションだけがプレイヤー幅を変更できる。
     if (activeMemoSession === session) {
       activeMemoSession = null;
-      player.style.width = originalWidth || '100%';
+      player.style.width = originalWidth;
     }
     sb.remove();
     if (notify) onClose?.();
+    if (restoreFocus && focusTarget?.isConnected) {
+      focusTarget.focus?.();
+    }
   };
   closeBtn.onclick = closeSidebar;
   header.append(title, closeBtn);
@@ -219,10 +235,11 @@ export function openMemoSidebar({
     };
     const result = onSave ? onSave(enriched) : sendData(enriched);
     Promise.resolve(result)
-      .catch((error) => console.error('保存エラー:', error))
+      .catch(() => console.error('保存に失敗しました'))
       .finally(() => {
         // 再オープンで置き換えられた旧セッションは、新しい入力中の再生状態に触れない。
         if (
+          !closed &&
           !superseded &&
           (!activeMemoSession || activeMemoSession === session)
         ) {
@@ -235,7 +252,10 @@ export function openMemoSidebar({
   // パネル内キーはサイトへ渡さず入力欄で処理。Enter で保存（IME 変換確定・リピート除外）。
   const onPanelKey = (e) => {
     if (!sb.contains(e.target)) return;
-    if (
+    if (e.type === 'keydown' && e.key === 'Escape' && !e.isComposing) {
+      e.preventDefault();
+      closeSidebar();
+    } else if (
       e.target === nameInput &&
       e.type === 'keydown' &&
       e.key === 'Enter' &&
@@ -280,6 +300,7 @@ export function openMemoSidebar({
   };
 
   const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
   saveBtn.textContent = '保存';
   saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
   saveBtn.onclick = submit;
@@ -299,27 +320,156 @@ export function openMemoSidebar({
   };
   activeMemoSession = session;
 
+  const MutationObserverConstructor = globalThis.MutationObserver;
+  const observationRoot = document.documentElement || document.body;
+  if (
+    typeof MutationObserverConstructor === 'function' &&
+    observationRoot
+  ) {
+    const mountObserver = new MutationObserverConstructor(() => {
+      if (!closed && !sb.isConnected) {
+        closeSidebar({ restoreFocus: false });
+      }
+    });
+    mountObserver.observe(observationRoot, { childList: true, subtree: true });
+    removeMountObserver = () => mountObserver.disconnect();
+  }
+
   nameInput.focus();
   nameInput.select();
 
   return sb;
 }
 
-export function markAutoNavigation(reason = 'auto') {
-  sessionStorage.setItem(AUTO_NAVIGATION_KEY, reason);
-  localStorage.setItem(AUTO_NAVIGATION_KEY, reason);
+function readAutoNavigationMarker() {
+  try {
+    const rawMarker = globalThis.sessionStorage?.getItem(AUTO_NAVIGATION_KEY);
+    if (!rawMarker) return null;
+    const marker = JSON.parse(rawMarker);
+    if (!marker || typeof marker !== 'object') return null;
+    return marker;
+  } catch {
+    return null;
+  }
 }
 
-export function isAutoNavigation() {
+export function markAutoNavigation({
+  ownerNonce,
+  expectedRoute,
+  reason = 'auto',
+  now = Date.now(),
+} = {}) {
+  clearAutoNavigation();
+  if (
+    typeof ownerNonce !== 'string' ||
+    ownerNonce.length < 8 ||
+    typeof expectedRoute !== 'string' ||
+    expectedRoute.length === 0 ||
+    !Number.isFinite(now)
+  ) {
+    return false;
+  }
+
+  try {
+    globalThis.sessionStorage?.setItem(
+      AUTO_NAVIGATION_KEY,
+      JSON.stringify({ ownerNonce, expectedRoute, reason, createdAt: now }),
+    );
+    return Boolean(globalThis.sessionStorage);
+  } catch {
+    return false;
+  }
+}
+
+export function isAutoNavigation({
+  ownerNonce,
+  expectedRoute,
+  maxAgeMs = AUTO_NAVIGATION_TTL_MS,
+  now = Date.now(),
+} = {}) {
+  const marker = readAutoNavigationMarker();
+  const age = now - Number(marker?.createdAt);
   return Boolean(
-    sessionStorage.getItem(AUTO_NAVIGATION_KEY) ||
-      localStorage.getItem(AUTO_NAVIGATION_KEY)
+    marker &&
+      typeof ownerNonce === 'string' &&
+      marker.ownerNonce === ownerNonce &&
+      typeof expectedRoute === 'string' &&
+      marker.expectedRoute === expectedRoute &&
+      Number.isFinite(maxAgeMs) &&
+      maxAgeMs >= 0 &&
+      Number.isFinite(age) &&
+      age >= 0 &&
+      age <= maxAgeMs
   );
 }
 
 export function clearAutoNavigation() {
-  sessionStorage.removeItem(AUTO_NAVIGATION_KEY);
-  localStorage.removeItem(AUTO_NAVIGATION_KEY);
+  try {
+    globalThis.sessionStorage?.removeItem(AUTO_NAVIGATION_KEY);
+  } catch {
+    // バックグラウンド側の所有権検査により、事前登録されていない遷移先は引き続き拒否される。
+  }
+}
+
+export function consumeAutoNavigation(options) {
+  const matched = isAutoNavigation(options);
+  clearAutoNavigation();
+  return matched;
+}
+
+export function handleOwnedPlaybackRouteChange({
+  ownerNonce,
+  currentRoute,
+  nextRoute,
+  onAutoNavigation,
+  onManualNavigation,
+}) {
+  if (!ownerNonce || nextRoute === currentRoute) return 'unchanged';
+  if (consumeAutoNavigation({ ownerNonce, expectedRoute: nextRoute })) {
+    onAutoNavigation?.(nextRoute);
+    return 'auto';
+  }
+  onManualNavigation?.();
+  return 'manual';
+}
+
+export function createElementWait(
+  selector,
+  {
+    documentRef = globalThis.document,
+    MutationObserverConstructor = globalThis.MutationObserver,
+  } = {},
+) {
+  let observer = null;
+  let settled = false;
+  let resolveWait;
+  const finish = (element) => {
+    if (settled) return;
+    settled = true;
+    observer?.disconnect();
+    resolveWait(element);
+  };
+  const promise = new Promise((resolve) => {
+    resolveWait = resolve;
+    const existing = documentRef?.querySelector?.(selector);
+    if (existing) {
+      finish(existing);
+      return;
+    }
+    if (!documentRef?.body || typeof MutationObserverConstructor !== 'function') {
+      finish(null);
+      return;
+    }
+    observer = new MutationObserverConstructor(() => {
+      const element = documentRef.querySelector(selector);
+      if (element) finish(element);
+    });
+    observer.observe(documentRef.body, { childList: true, subtree: true });
+  });
+  return {
+    promise,
+    cancel: () => finish(null),
+  };
 }
 
 // === タブ可視性に応じた拡張 UI の表示制御 ===

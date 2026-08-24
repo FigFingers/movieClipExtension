@@ -1,9 +1,12 @@
 import {
   STORAGE_KEYS,
   storageGet,
-  storageSet,
   normalizePendingClips,
 } from './../shared/storage.js';
+import {
+  isValidExtensionAuthToken,
+  isValidExtensionInstanceId,
+} from './../shared/authValidation.js';
 
 // このモジュールは content script 専用。サイト API への fetch(同期・トークンリフレッシュ)は
 // background(src/background/sync.js, tokenRefresh.js)が担う。content の fetch はページ
@@ -56,7 +59,7 @@ function sendRuntimeMessage(message) {
 export async function getOrCreateExtensionInstanceId() {
   const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
   const existingId = stored[STORAGE_KEYS.extensionInstanceId];
-  if (existingId) {
+  if (isValidExtensionInstanceId(existingId)) {
     return existingId;
   }
 
@@ -64,7 +67,7 @@ export async function getOrCreateExtensionInstanceId() {
   // 読んで別 UUID を作ると instanceId 不一致でトークンが拒否されるため、ここでは自前生成
   // せず background の直列化された生成器から取得する。
   const response = await sendRuntimeMessage({ type: 'GET_OR_CREATE_INSTANCE_ID' });
-  if (response?.ok && response.extensionInstanceId) {
+  if (response?.ok && isValidExtensionInstanceId(response.extensionInstanceId)) {
     return response.extensionInstanceId;
   }
   throw new Error(response?.message || 'Failed to obtain extensionInstanceId');
@@ -72,7 +75,10 @@ export async function getOrCreateExtensionInstanceId() {
 
 export async function getExtensionInstanceId() {
   const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
-  return stored[STORAGE_KEYS.extensionInstanceId] ?? null;
+  const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
+  return isValidExtensionInstanceId(extensionInstanceId)
+    ? extensionInstanceId
+    : null;
 }
 
 export async function getExtensionConnectionState() {
@@ -83,7 +89,10 @@ export async function getExtensionConnectionState() {
     STORAGE_KEYS.lastSyncAt,
     STORAGE_KEYS.pendingClips,
   ]);
-  const extensionAuthToken = stored[STORAGE_KEYS.extensionAuthToken] || null;
+  const storedAuthToken = stored[STORAGE_KEYS.extensionAuthToken];
+  const extensionAuthToken = isValidExtensionAuthToken(storedAuthToken)
+    ? storedAuthToken
+    : null;
 
   return {
     extensionInstanceId,
@@ -124,14 +133,13 @@ export function toExtensionClipPayload(clip) {
 
 export async function enqueueClip(clip) {
   const normalizedClip = toExtensionClipPayload(clip);
-  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
-  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
-  const queueById = new Map(pendingClips.map((item) => [item.clientItemId, item]));
-  queueById.set(normalizedClip.clientItemId, normalizedClip);
-
-  await storageSet({
-    [STORAGE_KEYS.pendingClips]: Array.from(queueById.values()),
+  const result = await sendRuntimeMessage({
+    type: 'ENQUEUE_PENDING_CLIP',
+    clip: normalizedClip,
   });
+  if (!result?.ok) {
+    throw new Error(result?.message || result?.reason || 'Failed to enqueue clip');
+  }
 
   return normalizedClip;
 }

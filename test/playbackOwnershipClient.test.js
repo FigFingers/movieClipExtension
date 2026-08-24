@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   PLAYBACK_OWNER_TAB_KEY,
   claimPlaybackOwnership,
+  createPlaybackOwnerNonce,
+  getTabPlaybackOwnerNonce,
 } from '../src/content/playbackOwnership.js';
 
 class MemorySessionStorage {
@@ -53,6 +55,68 @@ test('an explicit URL nonce never falls back to an opener handoff', async () => 
   assert.deepEqual(result, { ok: false, reason: 'handoff_not_found' });
   assert.equal(messages.length, 1);
   assert.equal(messages[0].nonce, 'url-nonce-1');
+});
+
+test('an empty URL nonce marker does not reuse tab-local or legacy ownership', async () => {
+  const { messages } = installGlobals({
+    href: 'https://www.netflix.com/watch/1?dextPlaybackOwner=',
+    storedNonce: 'stored-owner-nonce',
+    respond: (message) => message.nonce === null
+      ? {
+          ok: true,
+          nonce: 'unexpected-legacy-nonce',
+          context: { mode: 'clip', clipId: 1 },
+          snapshot: {},
+        }
+      : { ok: false, reason: 'invalid_claim' },
+  });
+
+  const nonce = getTabPlaybackOwnerNonce();
+  assert.equal(nonce, '');
+  assert.deepEqual(await claimPlaybackOwnership({ nonce }), {
+    ok: false,
+    reason: 'invalid_claim',
+  });
+  assert.deepEqual(messages.map((message) => message.nonce), ['']);
+});
+
+test('nonce generation uses secure random bytes when randomUUID is unavailable', () => {
+  const previousCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  Object.defineProperty(globalThis, 'crypto', {
+    configurable: true,
+    value: {
+      getRandomValues(bytes) {
+        bytes.fill(0xab);
+        return bytes;
+      },
+    },
+  });
+
+  try {
+    assert.equal(
+      createPlaybackOwnerNonce(),
+      'abababab-abab-4bab-abab-abababababab'
+    );
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', previousCrypto);
+  }
+});
+
+test('nonce generation fails closed without a secure random source', () => {
+  const previousCrypto = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  Object.defineProperty(globalThis, 'crypto', {
+    configurable: true,
+    value: undefined,
+  });
+
+  try {
+    assert.throws(
+      () => createPlaybackOwnerNonce(),
+      /Secure random number generator/
+    );
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', previousCrypto);
+  }
 });
 
 test('a stale tab-local nonce falls back to a late legacy handoff', async () => {
