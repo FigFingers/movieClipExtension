@@ -1,958 +1,527 @@
 # READMEFORLLM
 
-このファイルは人間向け README ではなく、LLM / AI コーディングエージェント向けの運用資料です。目的は「この README を読めば、どの実行面に何が載っていて、どの状態や契約を壊すと危険か」を短時間で把握できるようにすることです。
+このファイルは人間向け README ではなく、LLM / AI コーディングエージェント向けの運用資料です。目的は「どの実行面に何が載っていて、どの状態や契約を壊すと危険か」を短時間で把握できるようにすることです。
 
-## Project Overview
+- 対象コミット: `b9d8fa5`（ブランチ `codex/comment-playback-hardening`）
+- 最終更新: 2026-08-25
+- 実測値: `src/` 34 ファイル / 約 7,800 行、`test/` 15 ファイル / 143 tests
 
-このリポジトリは Chrome Extension (Manifest V3) です。主な用途は、Netflix / Disney+ 上で動画クリップを記録し、`http://localhost:3000` のローカル API / ローカル Web アプリと連携してクリップ保存・単体再生・プレイリスト再生を行うことです。
+この repo に含まれるのは拡張機能側だけです。サイト（`react--site`, Next.js）と backend は別リポジトリにあります。したがってサイト API の応答 shape や `window.postMessage` の送信元仕様は、拡張が実際に読んでいる範囲だけを事実として扱い、それ以外は `未確認` として扱ってください。
 
-この repo に含まれるのは拡張機能の frontend 側だけです。backend / localhost ページ本体は含まれていません。したがって API 応答 shape や `window.postMessage` の送信元仕様は、frontend が実際に読んでいる範囲だけを事実として扱い、それ以外は `未確認` または `推定` として扱う必要があります。
+関連資料:
 
-実装は 1 つのアプリではなく、次の 4 実行面に分かれています。
+- `docs/localhost-playback-bridge-contract-v1.md` — サイト⇄拡張の再生ハンドオフ入力契約の**正典**
+- `CODE_ISSUES_FOR_LLM.md` — 既知の問題と、再指摘してはいけない対応済み項目
 
-- Background service worker
-- Netflix 向け content script bundle
-- Disney+ 向け content script bundle
-- `localhost:3000` 向け bridge content script
+## 前提: ビルドしないと何も変わらない
+
+`manifest.json` が読むのは `dist/` のバンドルです。`.gitignore` は `/dist` を無視するため、clean clone 直後の `dist/` は存在しません。
+
+```
+npm install
+npm run build     # 一回ビルド
+npm run dev       # webpack --watch
+```
+
+`webpack.config.js` の entry は 5 つで、それぞれ `dist/<name>.js` を出力します。
+
+| entry | 入力 | 出力 |
+|---|---|---|
+| `content` | `src/content/content_netflix.js` | `dist/content.js` |
+| `content_disney` | `src/content/content_disney.js` | `dist/content_disney.js` |
+| `extension_link` | `src/content/extension_link.js` | `dist/extension_link.js` |
+| `getClipData` | `src/content/getClipData.js` | `dist/getClipData.js` |
+| `background` | `src/background/background.js` | `dist/background.js` |
+
+**source を直しても build しない限り、ブラウザで動くコードは変わりません。**
+
+検証コマンド:
+
+- `npm run lint` — `biome lint .`（linter のみ、formatter は無効）
+- `npm test` — `node --test`。実テストがあり、変更後は必ず実行する
+- `npm run build` — webpack production
 
 ## Execution Surfaces
 
-| Surface | Loaded from | Trigger | Main entry / handlers | Notes |
+`manifest.json` が定義する実行面は 7 つです。`world: MAIN` の 3 本は bundle されず、`src/` から直接読まれます。
+
+| Surface | manifest が読むファイル | matches | run_at | world |
 |---|---|---|---|---|
-| Background service worker | `src/background/background.js` | extension install/update, runtime message | `handleInstalledDemo()`, `chrome.runtime.onMessage` (`seek`, `HISTORY_CHANGE`) | Netflix seek を page `MAIN` world で実行する唯一の場所 |
-| Netflix bundle | `dist/content.js` generated from `src/content/content_netflix.js` | `https://www.netflix.com/*`, `document_idle` | `initializeNetflixPlayback()`, `bootstrapRecordControls()`, `init()`, `startPlaylistMode()` | 録画、一覧表示、clip/playlist 再生が 1 file に密集 |
-| Netflix history/page hook | `src/util/history_change.js`, `src/inject/inject_script.js`, and runtime injection from `content_netflix.js` | `https://www.netflix.com/*`, `document_end` + runtime injection | `history.pushState` / `replaceState` patch, `historyChange` event dispatch | 同じ hook が複数経路で入る |
-| Disney+ bundle | `dist/content_disney.js` generated from `src/content/content_disney.js` | `https://www.disneyplus.com/*`, `document_idle` | top-level IIFE, `UI.bootstrap()`, `Mode.bootstrap()` | Netflix よりモジュール分割されている |
-| Localhost bridge | `src/content/getClipData.js` | `http://localhost:3000/*`, `document_idle` | `window.addEventListener("message")`, `clipSelected`, `playQueue()` | 外部 localhost ページと拡張の接続面 |
+| Background service worker | `dist/background.js` | — | — | — |
+| Netflix: page hook 注入器 | `src/inject/inject_script.js` | `netflix.com/*` | `document_end` | isolated |
+| Netflix: 本体 | `dist/content.js` | `netflix.com/*` | `document_idle` | isolated |
+| Disney+: history hook | `src/util/history_change.js` | `disneyplus.com/*` | `document_start` | **MAIN** |
+| Disney+: 本体 | `dist/content_disney.js` | `disneyplus.com/*` | `document_idle` | isolated |
+| localhost: 認証 + 再生ブリッジ | `dist/extension_link.js`, `dist/getClipData.js` | `localhost:3000/*`, `127.0.0.1:3000/*` | `document_idle` | isolated |
+| localhost: 検知フラグ | `src/content/extension_present.js` | `localhost:3000/*`, `127.0.0.1:3000/*` | `document_start` | **MAIN** |
 
-重要:
+`web_accessible_resources` は Netflix に対して `src/util/history_change.js` を公開しています。`inject_script.js` がこれを `<script src=chrome-extension://...>` として MAIN world へ差し込みます。
 
-- manifest が読むのは `src/content/*.js` ではなく `dist/content.js` / `dist/content_disney.js`
-- `webpack.config.js` は `dist/` を出力先にする
-- `.gitignore` は `/dist` を無視する
-- `git ls-files dist` は空で、現在の `dist/` は git 追跡対象ではない
+permissions: `activeTab`, `storage`, `tabs`, `scripting`, `alarms`
+host_permissions: `localhost:3000`, `127.0.0.1:3000`, `www.netflix.com`, `www.disneyplus.com`
 
-つまり、この拡張は「生成物が必要なのに、その生成物は repo で安定管理されていない」構成です。source を直しても build しない限り manifest 実行コードは変わりません。
+**localhost の content script は `:3000` に限定されています。** 別ポートのローカルアプリからトークンを奪われないための境界なので、matches を広げてはいけません。
 
-## Important Files and Dependency Map
+## モジュール構成
 
-```text
-manifest.json
-webpack.config.js
-src/api.js
-src/background/background.js
-src/content/common.js
-src/content/content_netflix.js
-src/content/content_disney.js
-src/content/getClipData.js
-src/util/services.js
-src/util/history_change.js
-src/util/cookies.js
-src/image/{recordSVG.js, moreDetailSVG.js, LoopButtonSVG.js}
-```
+### `src/shared/` — content と background の両方から import される純粋モジュール
 
-依存関係の実態:
+DOM にも `chrome.*` にも依存しないため、両実行面で同じ規則を適用できます。**信頼境界の要なので、片側だけ変更してはいけません。**
 
-- `src/content/content_netflix.js`
-  - imports `../css/content_button.css`
-  - imports `../image/recordSVG.js`, `../image/moreDetailSVG.js`, `../image/LoopButtonSVG.js`
-  - imports `../api.js`
-  - imports `./common.js`
-  - imports `../util/cookies.js`
-  - imports `../util/services.js`
-- `src/content/content_disney.js`
-  - imports `./common.js`
-  - URL 組み立ては `util/services.js` を使わず、内部で clip 正規化を持つ
-- `src/content/common.js`
-  - imports `../api.js`
-- `src/content/getClipData.js`
-  - imports なし
-  - `src/util/services.js` とほぼ同じ service URL helper を内部に再実装している
-- `src/background/background.js`
-  - standalone
-  - Netflix player API に直接触る page-world 実行担当
-- `src/util/history_change.js`
-  - standalone side-effect script
-  - `historyChange` CustomEvent を発火するだけ
-- `src/image/*.js`
-  - ES module import されるが、実態は `window.createSVG`, `window.createMoreDetailSVG`, `window.LoopButtonSVG` を登録する副作用モジュール
+| ファイル | 役割 |
+|---|---|
+| `playbackBridgeValidation.js` | 再生ハンドオフ入力の検証・正規化。契約 v1 の実装本体 |
+| `storage.js` | `STORAGE_KEYS`、`storageGet/Set/Remove`、`normalizePendingClips`、`clearExtensionAuthState` |
+| `authValidation.js` | `isValidExtensionInstanceId` / `isValidExtensionAuthToken` / `normalizeExtensionTokenExpiry` |
+| `commentText.js` | `COMMENT_BODY_MAX_CODE_POINTS = 500`、`isValidCommentBody`（UTF-16 長ではなく code point 数で判定） |
 
-## Entry Points
+### `src/background/`
 
-### `manifest.json`
+| ファイル | 役割 |
+|---|---|
+| `background.js` | 全リスナーの配線のみ。ロジックは各モジュールへ委譲 |
+| `playbackOwnership.js` | `createPlaybackOwnershipManager()`。タブ単位の再生所有権レジストリ |
+| `sync.js` | `enqueuePendingClipInBackground` / `syncPendingQueue` / `openLoginTab` |
+| `comments.js` | `fetchClipComments` / `postClipComment` と応答 shape 検証 |
+| `tokenRefresh.js` | `checkAndRefreshToken`。期限判定・ローテーション・失敗バックオフ |
+| `authState.js` | トークン保存・連携解除を `runExclusive` 内で実行 |
+| `instanceId.js` | `getOrCreateInstanceId`。instanceId の唯一の発行元 |
+| `authMutex.js` | `runExclusive`。認証状態の直列化 |
+| `request.js` | `fetchJsonWithTimeout`（15 秒。本文読み込みも Abort 対象） |
+| `detachedTasks.js` | `runDetachedTask` / `runPlaybackCleanupTask` |
 
-```json
-{
-  "background": {
-    "service_worker": "src/background/background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": ["https://www.netflix.com/*"],
-      "run_at": "document_end",
-      "js": ["src/inject/inject_script.js", "src/util/history_change.js"]
-    },
-    {
-      "matches": ["https://www.netflix.com/*"],
-      "run_at": "document_idle",
-      "js": ["dist/content.js"]
-    },
-    {
-      "matches": ["https://www.disneyplus.com/*"],
-      "run_at": "document_idle",
-      "js": ["dist/content_disney.js"]
-    },
-    {
-      "matches": ["http://localhost:3000/*"],
-      "run_at": "document_idle",
-      "js": ["src/content/getClipData.js"]
-    }
-  ]
-}
-```
+### `src/content/`
 
-### Netflix boot sequence
+| ファイル | 行数 | 役割 |
+|---|---:|---|
+| `commentPanel.js` | 1,303 | コメントパネル UI・取得・投稿・下書き保持 |
+| `content_disney.js` | 1,134 | Disney+ の録画 UI・clip / playlist 再生 |
+| `content_netflix.js` | 1,001 | Netflix の録画 UI・一覧・clip / playlist 再生 |
+| `common.js` | 506 | メモサイドバー、`detectService`、seek、自動遷移マーカー |
+| `extensionSync.js` | 195 | instanceId / トークン / 同期の content 側窓口 |
+| `playbackOwnership.js` | 193 | 所有権 client（nonce 生成・claim・update・release） |
+| `getClipData.js` | 188 | localhost → 拡張の**再生**ブリッジ |
+| `playbackContext.js` | 146 | タブ固有の再生対象 context |
+| `extension_link.js` | 80 | localhost → 拡張の**認証**ブリッジ |
+| `netflixClipSelection.js` | 42 | 選択クリップの正規化と原子的 commit |
+| `domUpdates.js` | 5 | `setTextContentIfChanged`（同値 DOM 更新の抑制） |
+| `extension_present.js` | 4 | MAIN world の検知フラグ |
 
-1. `dist/content.js` が `document_idle` で読み込まれる
-2. `src/content/content_netflix.js` の side-effect import で CSS と SVG helper が `window.*` に登録される
-3. `initializeNetflixPlayback()` が 1 回だけ動く
-4. `clearAutoNavigation()` を呼んで `extAutoNavigation` をクリアする
-5. `bootstrapRecordControls()` が録画 UI 用 `MutationObserver` を開始する
-6. `onWindowLoad(...)` の中で mode 復元を実行する
-7. `chrome.storage.local` の `playmode`, `playClipSystemKey`, `playlistSystemKey` を見て `init()` または `startPlaylistMode()` を選ぶ
-8. `beforeunload` で mode key を落とす。ただし `isAutoNavigation()` が true なら cleanup をスキップする
+### `src/util/` / `src/ui/` / `src/types/`
 
-### Disney+ boot sequence
-
-1. `dist/content_disney.js` が `document_idle` で読み込まれる
-2. top-level IIFE が immediately 実行される
-3. `UI.bootstrap()` が UI 注入用 `MutationObserver` と history hook をセットする
-4. `Mode.bootstrap()` が `window.load` 後に `startPreferredMode()` を呼ぶ
-5. `startPreferredMode()` は `autoNav` -> `playmode` -> `playClipSystemKey` / `playlistSystemKey` の順に mode を解決する
-6. `beforeunload` で mode key を落とす。ただし `isAutoNavigation()` または `autoNavCache` が有効なら cleanup をスキップする
-
-### Localhost boot sequence
-
-1. `src/content/getClipData.js` が `localhost:3000` 上に注入される
-2. `clipSelected` CustomEvent listener と `window.message` listener が登録される
-3. 外部 page からの `SET_CLIP_DATA`, `PLAY_PLAYLIST_START`, `EXT/SET_SESSION` を受けて extension state を更新する
-4. playlist 開始時だけは `playQueue()` が即座に service URL に遷移する
-
-### Background boot sequence
-
-1. `chrome.runtime.onInstalled` が `handleInstalledDemo()` を呼ぶ
-2. install/update 時に `http://localhost:3000/` を開く
-3. `chrome.runtime.onMessage` が `seek` を受けると Netflix player API へシークする
-4. `chrome.runtime.onMessage` が `HISTORY_CHANGE` を受けるとログだけ出す
+- `util/services.js` — `SERVICE_BASE_URL`、`normalizeService`、`buildServiceUrl`
+- `util/cookies.js` — `setCookie` / `parseCookies` / `getCookie`
+- `util/history_change.js` — `pushState` / `replaceState` / `popstate` を `historyChange` CustomEvent に変換
+- `ui/icons.js` — `createIcon(name)`。SVG は**このファイル内の定数のみ**を `innerHTML` に通す
+- `types/clip.js` — JSDoc typedef のみ（実行時コードなし）
 
 ## Core Architecture
 
-### 1. Clip recording
+### 1. 再生所有権（最重要）
 
-Netflix と Disney+ は録画 UI が別実装ですが、保存 UI は `src/content/common.js#openMemoSidebar()` を共用します。
+この拡張で最も理解が必要な仕組みです。**複数タブが同じ `chrome.storage.local` を共有しても、再生状態が混線しないようにするための層**です。
 
-Netflix:
+構成要素:
 
-- `bootstrapRecordControls()` が録画ボタンを作る
-- `recordObserver` が Netflix player control DOM を監視してボタンを差し込む
-- 1 回目クリックで `startTime = video.currentTime`
-- 2 回目クリックで `EndTime`, `URL`, `service`, `title`, `epnumber`, `user` を payload 化する
-- `openMemoSidebar({ data, videoPlayer, onSave: sendData })` を開く
+| 要素 | 置き場所 | 生存範囲 |
+|---|---|---|
+| owner nonce | URL query `dextPlaybackOwner` / `sessionStorage.dextPlaybackOwnerTab` | タブ |
+| ownership registry | `chrome.storage.session.activePlaybackTabsV1` | ブラウザセッション |
+| 再生スナップショット | `chrome.storage.local`（`clip` / `playQueue` ほか） | 永続 |
+| playback context | `sessionStorage.dextPlaybackContextV1` | タブ |
 
-Disney+:
+フロー:
 
-- `UI` 内の `myCustomActionLeft()` が 2 段階トグルで開始/終了を記録する
-- `Service.DPlusTime.get()` が shadow DOM から現在秒数を取得する
-- 2 回目クリックで `clipName`, `StartTime`, `EndTime`, `URL`, `title`, `epnumber`, `service`, `user` を payload 化する
-- その payload を `openMemoSidebar()` に渡す
+1. 再生を始めたい側（localhost ブリッジ or Netflix 一覧）が `createPlaybackOwnerNonce()` で nonce を作る
+2. `beginPlaybackHandoff({ nonce, mode, clipId, snapshot })` を background へ送る
+3. background が `normalizePlaybackSnapshot()` で**再検証**し、registry の `pending` へ TTL 30 秒で登録する
+4. 遷移先 URL に `addPlaybackOwnerToUrl()` で nonce を付けて遷移する
+5. 遷移先タブの content script が `claimPlaybackOwnership({ nonce })` を呼ぶ
+6. background が nonce・タブ・ルートの一致を確認し、`pending` から `active` へ移して snapshot を返す
+7. content は返ってきた snapshot だけを正本として再生を始める
 
-設計意図:
+重要な性質:
 
-- 録画開始/終了の DOM 取得方法はサービスごとに違う
-- ただし「クリップ名入力 + 保存 POST」の UI は両サービスで同じ
+- **content の検証結果を background は信用しません。** 同じ規則で再検証します。
+- 拒否時は storage・registry・画面遷移のいずれも部分更新しません。
+- owner も pending も無くなった場合、mode フラグだけでなく `clip` / `playQueue` / `nextClip` も消去します。
+- `chrome.alarms`（`playback-handoff-cleanup:<nonce>`、30 秒後）が期限切れの pending を回収します。
+- `chrome.tabs.onRemoved` / `onCreated` / `onUpdated` が registry を追従させます。
 
-### 2. Netflix clip list and single-clip playback
+### 2. 再生コンテキストとコメント対象の解決
 
-この機能は `src/content/content_netflix.js` 独自です。`common.js#openMemoSidebar()` とは別に、Netflix 専用の「記録一覧サイドバー」を持ちます。
-
-- `createLoopButton()` / `createPlayNextClipButton()` でプレイヤー右側 UI を生成
-- `openSidebar()` が `nf-memo-sidebar` を生成し、`fetchDataAndRender()` を呼ぶ
-- `fetchDataAndRender()` は `GET /api/random10` を呼び、`data.allReceivedData || []` を `renderClipList()` に渡す
-- `renderClipList()` は各 item の `title`, `epnumber`, `user`, `startTime`, `endTime`, `id` を使って一覧 UI を描画する
-- ジャンプボタンから `selectClip(clipId)` を呼ぶ
-- `selectClip()` は `GET /api/fetchClip?id=...` を呼び、response text を `JSON.parse()` する
-- 取得データを `setClipDataOnCookies()` で current origin cookie に書き、`redirectToClip()` で新規タブを開く
-
-重要な不整合:
-
-- `selectClip()` は `chrome.storage.local.clip` を書かない
-- しかし Netflix の `init()` は `loadClipFromStorage()` 経由で `chrome.storage.local.clip` を読む
-- repo 内で `clip` を書くのは `src/content/getClipData.js` の `clipSelected` と `SET_CLIP_DATA` だけ
-- さらに `setClipDataOnCookies()` は Netflix / current origin cookie に書く一方、`getClipData.js#getCookies()` は `localhost:3000` cookie を読む
-
-したがって、この repo だけを見る限り、
-
-- `selectClip()` -> 新規 Netflix タブ -> `init()` の end-to-end clip 復元は確認できない
-- `clipSelected` cookie 経路も origin が一致しないため、同一 repo 内だけでは接続していない
-
-この部分は `未確認` ではなく「repo 内実装として不整合がある」と読むのが安全です。
-
-### 3. Playlist playback
-
-Playlist 再生は Netflix と Disney+ の両方にありますが、構造が異なります。
-
-Netflix:
-
-- `startPlaylistMode()` が `playQueue` を読む
-- `currentClipOrder` に対応する clip を `clipData` に詰める
-- `setupPlayer("playlist")` -> `monitorClipEnd(...)`
-- end 到達後 `playlistNextClip(playQueue, currentOrder)` を呼ぶ
-- `playlistNextClip()` は next clip を計算し、`currentClipOrder` / `currentClipId` を保存する
-- `handleClipTransition({ currentUrl, nextUrl, ... })` で same-URL / cross-URL を分岐する
-- same-URL の場合は `requestSeek()` をリトライし、`startUIWarmer()` で UI 表示を補助する
-- cross-URL の場合は `markAutoNavigation("playlist")` 後に `window.location.href` を変更する
-
-Disney+:
-
-- `Mode.startPlaylistMode()` が `playQueue` を sort し current clip を選ぶ
-- `Clip.play(clipData, { onEnd })` が再生制御の最小単位
-- `handlePlaylistEnd()` -> `playlistNextClip(playQueue, currentOrder)`
-- same-URL は次の `Clip.play()` を直接開始
-- cross-URL は `beginAutoNavigation({ mode, nextUrl, nextOrder, nextId })` で `autoNav` を保存してから `window.location.href` を変更する
-
-### 4. Cross-page auto navigation recovery
-
-なぜ `extAutoNavigation` や `autoNav` があるのか:
-
-- Netflix も Disney+ も `beforeunload` で `playClipSystemKey`, `playlistSystemKey`, `playmode` をリセットする
-- そのまま cross-page playlist 遷移すると、次ページ到達前に mode が消えてしまう
-- それを防ぐため、明示的に「これは手動離脱ではなく自動遷移」と印を残して cleanup をスキップしている
-
-実装差:
-
-- 共通フラグ: `src/content/common.js`
-  - `markAutoNavigation(reason)`
-  - `isAutoNavigation()`
-  - `clearAutoNavigation()`
-  - `sessionStorage` と `localStorage` の両方に `extAutoNavigation` を置く
-- Disney+ 追加フラグ:
-  - `autoNav` を `chrome.storage.local` に `{ ts, mode, nextUrl, nextOrder, nextId }` で保存
-  - `loadAutoNav()` が TTL 15 秒で検証する
-  - `startPreferredMode()` が次ページで mode を復元する
-
-### 5. Netflix seek bridge
-
-Netflix の seek は content script だけでは完結しません。
-
-- `common.js#requestSeek({ service: "Netflix", seconds })`
-- `chrome.runtime.sendMessage({ type: "seek", sec })`
-- `background.js` が受信し、`chrome.scripting.executeScript({ world: "MAIN" })` を使う
-- injected function 内で `window.netflix.appContext.state.playerApp.getAPI()` を辿って internal player を取得する
-
-なぜ background + `MAIN` world なのか:
-
-- Netflix の player API は page world 側にあり、isolated content script から直接触れない
-- そのため `background.js` が bridge になっている
-
-## Data Structures
-
-### Raw clip payloads observed in code
-
-この repo は field 名の揺れを前提に実装されています。以下は frontend が実際に扱っている raw shape です。
+`playbackContext.js` は「このタブが今どのクリップを再生しているか」を `sessionStorage` に持ちます。
 
 ```ts
-type RawClipPayload = {
-  title?: string;
-  clipName?: string;
-  clipname?: string;
-  user?: string;
-  username?: string;
-  epnumber?: string;
-  service?: string;
-  id?: string | number;
-  clipId?: string | number;
-  startTime?: string | number;
-  starttime?: string | number;
-  StartTime?: string | number;
-  endTime?: string | number;
-  endtime?: string | number;
-  EndTime?: string | number;
-  url?: string;
-  URL?: string;
-  Url?: string;
-};
+type PlaybackContext = { mode: 'clip' | 'playlist'; clipId: number };  // clipId は正の safe integer
+type Snapshot = { initialized: boolean; context: PlaybackContext | null };
 ```
 
-この raw shape を読む具体的な場所:
+- `initialized: true, context: null` は「このタブは初期化済みで、再生対象は無い」を意味します。**他タブの global state を借りてはいけない**ため、この 2 状態を区別しています。
+- `sessionStorage` が使えない環境ではモジュールローカル値にフォールバックしますが、**global storage へは決してフォールバックしません**（fail closed）。
+- 値が変わると `ext:playback-context-changed` CustomEvent を発火します。
 
-- `common.js#openMemoSidebar()`
-  - `StartTime`, `EndTime`, `URL`, `title`, `epnumber`, `service`, `clipName`
-- `content_netflix.js#loadClipFromStorage()`
-  - `startTime ?? starttime`
-  - `endTime ?? endtime`
-  - `title`
-- `content_disney.js#normalizeClipData()`
-  - `startTime ?? starttime`
-  - `endTime ?? endtime`
-  - `clipname ?? title`
-  - `url ?? URL ?? Url`
-- `content_disney.js#normalizeClipUrl()`
-  - `url ?? URL ?? Url`
+`commentPanel.js#resolveCurrentClipId()` はこの context だけを見ます。これにより、タブ A でコメントパネルを開いたままタブ B で別クリップを再生しても、タブ A の投稿先は変わりません。
 
-### Normalized clip shape used internally
+### 3. クリップ記録と同期キュー
 
-Netflix と Disney+ で完全統一はされていませんが、再生系が欲しがる最小 shape は次です。
+録画 UI はサービスごとに別実装ですが、保存 UI は `common.js#openMemoSidebar()` を共用します。
+
+Netflix: `bootstrapRecordControls()` が `MutationObserver` で録画ボタンを差し込み、1 回目クリックで開始秒、2 回目で終了秒を確定します。
+Disney+: `UI.myCustomActionLeft()` が 2 段階トグルで同じことをします。再生位置は shadow DOM 越しに取得します。
+
+保存経路:
+
+1. `common.js#sendData()` → `extensionSync.js#enqueueClip()`
+2. `toExtensionClipPayload()` が `clientItemId`（UUID）付きの正規化 payload を作る
+3. `ENQUEUE_PENDING_CLIP` で background へ送り、`chrome.storage.local.pendingClips` へ積む
+4. `SYNC_PENDING_CLIPS` → `sync.js#syncPendingQueue()` が `POST /api/extension/sync`（Bearer）
+5. 失敗しても queue に残り、15 分毎の alarm と SW 起動時に再送される
+
+**content から直接サイト API を fetch しません。** ページオリジンの CORS で弾かれるため、fetch は必ず background 側です。
+
+`syncPendingQueue()` の応答分岐:
+
+| status | 判定 | queued |
+|---|---|---|
+| 200 + 有効な `acceptedItemIds` | 受理分だけ queue から削除 | — |
+| 200 + 応答 shape 不正 | `invalid_response` | 残す |
+| 400 | `validation_error` | 内容により残す/捨てる |
+| 401 | `unauthorized` / `stale_unauthorized` | 残す |
+| 403 | `forbidden` | 残す |
+| その他 | `sync_failed` | 残す |
+
+`acceptedItemIds` は「送った `clientItemId` の集合に含まれ、重複しない文字列」であることまで検証します。**受理ゼロと field 欠落を区別する**ため、緩めてはいけません。
+
+### 4. 認証・連携・トークンライフサイクル
+
+サイト `/account` からの連携は `extension_link.js`（isolated world）が受けます。
+
+```
+site → GET_EXTENSION_INSTANCE_ID          → ext: port 'extensionInstanceId' で background から取得
+ext  → EXTENSION_INSTANCE_ID_RESPONSE
+site → EXTENSION_CHECK_AUTH               → ext: 連携状態を返す
+ext  → EXTENSION_AUTH_STATUS
+site → EXT_LINK_WITH_AUTH_TOKEN           → ext: SAVE_EXTENSION_AUTH_TOKEN で background が保存
+site → EXTENSION_UNLINKED                 → ext: UNLINK_EXTENSION でトークン破棄
+```
+
+境界:
+
+- `extension_link.js` は `TRUSTED_ORIGINS`（`SITE_ORIGIN` と `127.0.0.1` 版のみ）を検証します。manifest を絞っていても多層防御として残します。
+- 検知フラグ `window.__CLIP_EXTENSION_PRESENT__` は MAIN world の `extension_present.js` が設定します。isolated world で代入してもページからは見えません。
+- instanceId の発行元は `background/instanceId.js` の 1 箇所だけです。content 側で `randomUUID()` してはいけません。
+- トークンは**不透明トークン（非 JWT）**です。JWT としてデコードしようとしてはいけません。
+
+トークン更新（`tokenRefresh.js`）:
+
+- 6 時間毎の alarm と SW 起動時に `checkAndRefreshToken()`
+- 期限まで 15 日未満なら `POST /api/extension/token/refresh`（Bearer・ローテーション）
+- 失敗時は `extensionTokenRefreshBackoff` に記録して抑制（基準 15 分、未実装応答なら 6 時間）
+- バックオフは現トークンの fingerprint と一致するときだけ有効。再連携で差し替わったら破棄する
+
+### 5. コメント機能
+
+`commentPanel.js` が UI を持ち、通信は background の `comments.js` が行います。
+
+- `GET /api/extension/clips/{clipId}/comments?extensionInstanceId=...&limit=...&cursor=...`
+- `POST /api/extension/clips/{clipId}/comments`
+
+応答検証（`isValidCommentsSuccessResponse`）は HTTP 成功だけでは足りず、次を全て要求します。
+
+- `ok === true`
+- 各 comment の `id` が正の safe integer
+- `clipId` が要求した clipId と一致
+- `userId` が正の safe integer **または `null`**（退会ユーザーは `null` で返る契約）
+- `username` が文字列または `null`
+- `body` が `isValidCommentBody`（code point 500 以下）
+- `createdAt` が往復一致する ISO 文字列
+
+**匿名化された 1 件で一覧全体を `invalid_response` にしないこと**が要件です。
+
+### 6. Netflix seek bridge
+
+Netflix の player API は page world にあり、isolated content script から触れません。
+
+1. `common.js#requestSeek({ service: 'Netflix', seconds })`
+2. `chrome.runtime.sendMessage({ type: 'seek', sec })`
+3. `background.js#handleSeekMessage()` が **`sender.tab` を優先**して対象タブを決める（取れないときだけ active tab へフォールバック）
+4. 対象 URL が `https://www.netflix.com/watch/` でなければ `not_netflix_watch` を返して何もしない
+5. `chrome.scripting.executeScript({ world: 'MAIN' })` で `window.netflix.appContext.state.playerApp.getAPI()` を辿る
+6. player が取れるまで 200ms × 30 回リトライ
+
+Disney+ は `requestSeek` の `adapter` / `videoElement` 経路を使うため background を経由しません。
+
+### 7. 自動遷移マーカー
+
+playlist の cross-URL 継続では、遷移先で「これは手動離脱ではなく自動遷移」と判定する必要があります。
 
 ```ts
-type NormalizedClip = {
-  startTime: number;
-  endTime: number;
-  title: string;
-  url?: string;
-};
+// sessionStorage['extAutoNavigation']
+{ ownerNonce: string; expectedRoute: string; reason: string; createdAt: number }
 ```
 
-### Playlist item
+- `markAutoNavigation()` は **owner nonce と正規化済み遷移先ルートに束縛**して書きます。どちらか欠けると `false` を返して書きません。
+- `isAutoNavigation()` は nonce・route・TTL（15 秒）の**すべて**が一致した場合だけ true です。
+- `consumeAutoNavigation()` は判定後に必ず消します（one-shot）。
+- **`localStorage` は使いません。** origin 共有の marker はタブ A の自動遷移でタブ B の手動遷移を誤判定させるため、意図的に `sessionStorage` のみです。
 
-```ts
-type PlaylistItem = RawClipPayload & {
-  order: number;
-};
-```
-
-`order` は playlist 内の並び順です。少なくとも次の関数が前提にしています。
-
-- `getClipData.js#playQueue()`
-- `content_netflix.js#startPlaylistMode()`
-- `content_netflix.js#playlistNextClip()`
-- `content_disney.js#startPlaylistMode()`
-- `content_disney.js#playlistNextClip()`
-
-### `chrome.storage.local` state
-
-```ts
-type ExtensionState = {
-  clip?: RawClipPayload;
-  playQueue?: PlaylistItem[];
-  currentClipOrder?: number;
-  currentClipId?: string | number; // writer only in current repo
-  playClipSystemKey?: 0 | 1;
-  playlistSystemKey?: 0 | 1;
-  playmode?: "clip" | "playlist" | null;
-  autoNav?: {
-    ts: number;
-    mode: "clip" | "playlist";
-    nextUrl: string;
-    nextOrder?: number;
-    nextId?: string | number;
-  };
-  nextClip?: PlaylistItem; // writer only in current repo
-  lastSeenWelcomeVersion?: string;
-  lastSeenWhatsNewVersion?: string;
-  lastShownAt?: number;
-};
-```
-
-### Message payloads
-
-```ts
-type SeekMessage = { type: "seek"; sec: number };
-type HistoryChangeMessage = { type: "HISTORY_CHANGE"; data: { method?: string; url?: string } };
-type SetClipDataMessage = {
-  type: "SET_CLIP_DATA";
-  payload: { clip: RawClipPayload; playClipSystemKey?: number };
-};
-type PlayPlaylistStartMessage = { type: "PLAY_PLAYLIST_START" };
-type ExtSetSessionMessage = { type: "EXT/SET_SESSION"; payload: Record<string, unknown> };
-```
-
-## State Management
+## State Model
 
 ### `chrome.storage.local`
 
-| Key | Writers | Readers | Notes |
+| キー | 用途 | 主な writer |
+|---|---|---|
+| `clip` | 単体再生の対象クリップ | ownership manager |
+| `playQueue` | プレイリスト | ownership manager |
+| `currentClipOrder` / `currentClipId` | 再生位置 | ownership manager |
+| `nextClip` | 次クリップ | ownership manager |
+| `playClipSystemKey` / `playlistSystemKey` | モードフラグ（0/1） | ownership manager |
+| `playmode` | `'clip'` / `'playlist'` / `null` | ownership manager |
+| `playbackOwnerNonce` | 現在の所有者 nonce | ownership manager |
+| `extensionInstanceId` | 拡張インスタンス ID（UUID） | `instanceId.js` |
+| `extensionAuthToken` | 不透明トークン | `authState.js` |
+| `extensionTokenExpiresAt` | 期限（ISO） | `authState.js` / `tokenRefresh.js` |
+| `extensionTokenRefreshBackoff` | 更新失敗の抑制記録 | `tokenRefresh.js` |
+| `extensionLinked` | 連携済みフラグ | `authState.js` |
+| `pendingClips` | 未同期クリップ | `sync.js` |
+| `lastSyncAt` | 最終同期時刻 | `sync.js` |
+| `extensionLoginPromptLastOpenedAt` | ログインタブ連打防止（60 秒） | `sync.js` |
+| `lastSeenWelcomeVersion` / `lastSeenWhatsNewVersion` / `lastShownAt` | install/update デモ表示制御 | `background.js` |
+
+**再生系 9 キーは ownership manager 以外が書いてはいけません。** 直接 `storage.local.set()` すると所有権チェックを迂回します。
+
+### `chrome.storage.session`
+
+| キー | 内容 |
+|---|---|
+| `activePlaybackTabsV1` | `{ active: {tabId: entry}, pending: {nonce: handoff}, revision: number }` |
+
+### `sessionStorage`（タブ固有）
+
+| キー | 内容 |
+|---|---|
+| `dextPlaybackContextV1` | `{ initialized, context: { mode, clipId } \| null }` |
+| `dextPlaybackOwnerTab` | このタブの owner nonce |
+| `extAutoNavigation` | 自動遷移マーカー（TTL 15 秒） |
+
+### URL query parameter
+
+- `dextPlaybackOwner` — 遷移先へ owner nonce を運ぶ
+
+## Message Contracts
+
+### `chrome.runtime.sendMessage` → background
+
+| type | 送信元 | 効果 |
+|---|---|---|
+| `seek` | `common.js#requestSeek()` | Netflix player を MAIN world で seek |
+| `ENQUEUE_PENDING_CLIP` | `extensionSync.js` | `pendingClips` へ追加 |
+| `SYNC_PENDING_CLIPS` | `extensionSync.js` | `POST /api/extension/sync` |
+| `FETCH_CLIP_COMMENTS` | `commentPanel.js` | コメント取得 |
+| `POST_CLIP_COMMENT` | `commentPanel.js` | コメント投稿 |
+| `SAVE_EXTENSION_AUTH_TOKEN` | `extensionSync.js` | トークン保存 |
+| `UNLINK_EXTENSION` | `extensionSync.js` | 連携解除 |
+| `OPEN_LOGIN_TAB` | `sync.js` 経由 | ログインタブを開く |
+| `GET_OR_CREATE_INSTANCE_ID` | `extensionSync.js` | instanceId 取得 |
+| `BEGIN_PLAYBACK_HANDOFF` | `playbackOwnership.js`(content) | 再生ハンドオフ登録 |
+| `CLAIM_PLAYBACK_OWNERSHIP` | 同上 | 所有権取得 |
+| `UPDATE_PLAYBACK_OWNERSHIP` | 同上 | 所有権下での状態更新 |
+| `PREPARE_PLAYBACK_NAVIGATION` | 同上 | 遷移先ルートの事前登録 |
+| `RELEASE_PLAYBACK_OWNERSHIP` | 同上 | 所有権解放 |
+
+port `extensionInstanceId`（`chrome.runtime.connect`）でも instanceId を返します。
+
+### `window.postMessage`（サイト ⇄ 拡張）
+
+| 方向 | type | 受け手 |
+|---|---|---|
+| site → ext | `GET_EXTENSION_INSTANCE_ID` | `extension_link.js` |
+| site → ext | `EXTENSION_CHECK_AUTH` / `EXTENSION_AUTH_STATUS_REQUEST` | `extension_link.js` |
+| site → ext | `EXT_LINK_WITH_AUTH_TOKEN` | `extension_link.js` |
+| site → ext | `EXTENSION_UNLINKED` | `extension_link.js` |
+| site → ext | `SET_CLIP_DATA` | `getClipData.js` |
+| site → ext | `PLAY_PLAYLIST_START` | `getClipData.js` |
+| ext → site | `EXTENSION_INSTANCE_ID_RESPONSE` | サイト |
+| ext → site | `EXTENSION_AUTH_STATUS` | サイト |
+| ext → site | `EXTENSION_PLAYBACK_HANDOFF_RESULT` | サイト |
+
+### CustomEvent
+
+| event | 発火元 | 受け手 |
+|---|---|---|
+| `clipSelected` | サイト | `getClipData.js`（Cookie + `detail.clipId` から組み立て） |
+| `historyChange` | `history_change.js`（MAIN） | Netflix / Disney+ content |
+| `ext:playback-context-changed` | `playbackContext.js` | `commentPanel.js` |
+| `ext:comment-panel-open-state` | `commentPanel.js` | 各 content |
+| `ext:close-comment-panel` | `common.js` | `commentPanel.js` |
+
+`EXTENSION_PLAYBACK_HANDOFF_RESULT` の `reason` は固定 13 値です。詳細と全パラメータは正典 `docs/localhost-playback-bridge-contract-v1.md` を参照してください。**このファイルの記述と契約書が食い違う場合は契約書が正です。**
+
+## API Contracts
+
+`src/api.js` の `API_URL = 'http://localhost:3000/api/'` が基点です。
+
+| メソッド | パス | 呼び出し元 | 認証 |
 |---|---|---|---|
-| `clip` | `getClipData.js` `clipSelected`, `getClipData.js` `SET_CLIP_DATA` | `content_netflix.js#loadClipFromStorage()`, `content_disney.js#loadClipData()` | clip mode の正本。Netflix `selectClip()` はここを書かない |
-| `playQueue` | `getClipData.js` `PLAY_PLAYLIST_START`, `getClipData.js` `EXT/SET_SESSION` (任意) | Netflix `startPlaylistMode()`, Netflix `monitorClipEnd()`, Disney `loadPlaylistClip()`, Disney `startPlaylistMode()`, Disney `handlePlaylistEnd()` | playlist mode の正本 |
-| `currentClipOrder` | `getClipData.js` `PLAY_PLAYLIST_START`, `getClipData.js#playQueue()`, Netflix `playlistNextClip()`, Disney `beginAutoNavigation()`, Disney `startPlaylistMode()`, Disney `playlistNextClip()`, Netflix/Disney `beforeunload` cleanup | Netflix `startPlaylistMode()`, Netflix `monitorClipEnd()`, Disney `loadPlaylistClip()`, Disney `startPlaylistMode()`, Disney `playlistNextClip()` | playlist 継続位置 |
-| `currentClipId` | Netflix `playlistNextClip()`, Disney `beginAutoNavigation()`, Disney `startPlaylistMode()`, Disney `playlistNextClip()` | reader は repo 内に見当たらない | write-only。将来用か未完成の可能性あり |
-| `playClipSystemKey` | `getClipData.js` `clipSelected`, `SET_CLIP_DATA`; Netflix `init()` 直前や mode 解決; Disney `startClipMode()` / `startPreferredMode()` / `beginAutoNavigation()`; `beforeunload` cleanup | Netflix 初期化ガード, `loadClipFromStorage()`, mode 解決; Disney `loadClipData()`, `resolvePlayMode()`, `startPreferredMode()` | clip mode ON/OFF |
-| `playlistSystemKey` | `getClipData.js` `PLAY_PLAYLIST_START`; Netflix `startPlaylistMode()`, `beforeunload`; Disney `startPlaylistMode()`, `beginAutoNavigation()`, `beforeunload` | Netflix mode 解決; Disney `resolvePlayMode()`, `startPreferredMode()` | playlist mode ON/OFF |
-| `playmode` | `getClipData.js` `clipSelected`, `SET_CLIP_DATA`, `PLAY_PLAYLIST_START`, `playQueue()`, `EXT/SET_SESSION`; Netflix `init()` / `startPlaylistMode()` / mode 補正 / `beforeunload`; Disney `startClipMode()` / `startPlaylistMode()` / `beginAutoNavigation()` / mode 補正 / `beforeunload` | Netflix 初期化ガード, mode 解決; Disney `resolvePlayMode()`, `startPreferredMode()` | `"clip"`, `"playlist"`, `null` |
-| `autoNav` | Disney `beginAutoNavigation()` | Disney `loadAutoNav()` | Disney 専用。TTL 15 秒 |
-| `nextClip` | `getClipData.js#playQueue()` | reader は repo 内に見当たらない | write-only。現在はデバッグ/将来用に見える |
-| `lastSeenWelcomeVersion` | `background.js#handleInstalledDemo()` | 同左 | install/update 時の localhost デモ表示制御 |
-| `lastSeenWhatsNewVersion` | `background.js#handleInstalledDemo()` | 同左 | 同上 |
-| `lastShownAt` | `background.js#handleInstalledDemo()` | 同左 | localhost タブ連打防止 |
+| GET | `random10` | `content_netflix.js#fetchDataAndRender()` | なし |
+| GET | `fetchClip?id=...` | `content_netflix.js#selectClip()` | なし |
+| POST | `extension/sync` | `background/sync.js` | Bearer |
+| POST | `extension/token/refresh` | `background/tokenRefresh.js` | Bearer |
+| GET | `extension/clips/{clipId}/comments` | `background/comments.js` | instanceId query |
+| POST | `extension/clips/{clipId}/comments` | `background/comments.js` | instanceId query |
 
-### `sessionStorage` / `localStorage`
+サイトページ側:
 
-| Storage | Key | Writers | Readers | Notes |
-|---|---|---|---|---|
-| `sessionStorage` | `nfClipInitialized` | Netflix 初期化ガード | 同じガード処理 | 1 tab 内で不要 reset を防ぐ |
-| `sessionStorage` + `localStorage` | `extAutoNavigation` | `common.js#markAutoNavigation()` | `common.js#isAutoNavigation()` | cross-page cleanup 回避 |
-| `localStorage` | `playQueue` | 外部 localhost page | `getClipData.js` `PLAY_PLAYLIST_START` | extension state ではない。外部 page state |
-| `localStorage` | `ext_fallback` | `getClipData.js#safeSetStorage()` fallback | reader は repo 内に見当たらない | write-only fallback |
+- `/login` — `openLoginTab()`
+- `/` — install / update 時のデモタブ（`background.js#handleInstalledDemo()`）
 
-### In-memory local state
+**`POST /api/receive` は現在使われていません。** クリップ保存は `extension/sync` に一本化されています。
 
-Netflix:
+拡張 ID をサイトの `CLIP_API_ALLOWED_ORIGINS` に登録しないと、background からの fetch は `Origin: chrome-extension://<ID>` で 403 になります（README.md 参照）。
 
-- `videoPlayer`
-- `clipData`
-- `isLooping`
-- `togglekey`
-- `countdownIntervalId`
-- `uiWarmerInterval`
+## Boot Sequences
 
-Disney+:
+### Background
 
-- `autoNavCache`
-- `Playlist.state`
-- `Mode.stopCurrent`
-- `Mode.loopEnabled`
-- `clickStateLeft`
-- `starttime`
-- `observer`
-
-これらはページ遷移で消えるため、永続化が必要な情報は `chrome.storage.local` 側に寄せられています。
-
-### Server state
-
-frontend が見る server state は次の 3 API だけです。
-
-- `POST /api/receive`
-- `GET /api/random10`
-- `GET /api/fetchClip?id=...`
-
-一覧や詳細は毎回 fetch され、frontend 内に長期キャッシュはありません。
-
-## Data Flow Deep Dive
-
-### 1. Netflix 録画保存
-
-1. `bootstrapRecordControls()` が録画ボタンを生成する
-2. `recordObserver` が Netflix controls DOM にそのボタンを差し込む
-3. 1 回目クリックで `startTime = video.currentTime`
-4. 2 回目クリックで payload を組み立てる
-5. payload 例:
-
-```js
-{
-  StartTime,
-  EndTime,
-  URL: window.location.pathname,
-  service: detectService(),
-  user: "test_user",
-  title,
-  epnumber
-}
-```
-
-6. `openMemoSidebar({ data: payload, videoPlayer, onSave: (data) => sendData(data) })`
-7. `openMemoSidebar()` が `clipName` 入力欄を追加する
-8. 保存で `sendData()` が `POST /api/receive` を呼ぶ
-9. 成功/失敗に関わらず `videoPlayer.play()` とサイドバー close が走る
-
-### 2. Netflix 一覧から clip 再生
-
-1. `openSidebar()` が Netflix 専用一覧サイドバーを作る
-2. `fetchDataAndRender()` が `GET /api/random10` を呼ぶ
-3. response から `data.allReceivedData || []` を取り出す
-4. `renderClipList()` が item ごとのジャンプボタンを作る
-5. ジャンプで `selectClip(item.id)` を呼ぶ
-6. `selectClip()` が `GET /api/fetchClip?id=...` を呼ぶ
-7. response text を `JSON.parse(raw)` する
-8. `setClipDataOnCookies(data)` が current origin cookie に次の key を書く
-
-```text
-title
-user
-startTime
-endTime
-url
-service
-clipId
-username
-```
-
-9. `redirectToClip(data)` が `buildServiceUrl(service, url, Math.floor(startTime), "t")` を作る
-10. `window.open(finalUrl, "_blank")` で新規タブを開く
-11. 期待される次段は新規タブ側 `init()` だが、`init()` は `chrome.storage.local.clip` を読む
-
-注意:
-
-- この flow だけでは `chrome.storage.local.clip` が埋まらない
-- したがって README を読んだ LLM は、この flow を「完成済み」と仮定してはいけない
-
-### 3. Localhost から playlist 開始
-
-1. 外部 localhost page が `window.postMessage({ type: "PLAY_PLAYLIST_START" })` を送る
-2. `getClipData.js` がそれを受ける
-3. `localStorage.getItem("playQueue")` から page-local playlist JSON を読む
-4. `safeSetStorage({ playQueue: queue, currentClipOrder: 0, playmode: "playlist" })`
-5. `playQueue(queue)` が最小 `order` の clip を選ぶ
-6. `buildServiceUrl(normalizedService, nextClip.url, startTime, "t")` を作る
-7. 追加で `safeSetStorage({ playmode: "playlist", nextClip })` を書く
-8. `chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1 })`
-9. `chrome.storage.local.set({ currentClipOrder: 0 })`
-10. `window.location.href = url`
-
-注意:
-
-- `nextClip` はこの flow でしか書かれず、repo 内 reader は見当たらない
-
-### 4. Disney+ の same-URL playlist 継続
-
-1. `Clip.play()` が current clip 再生を開始する
-2. `startEndMonitor()` が `clipData.endTime` 到達を監視する
-3. 到達すると `handlePlaylistEnd()` が呼ばれる
-4. `playlistNextClip(playQueue, currentOrder)` が next clip を決める
-5. `normalizeClipData(next)` で `startTime`, `endTime`, `title`, `url` を正規化する
-6. `normalizeClipUrl(current)` と `normalizeClipUrl(next)` が同じなら `playPlaylistClip(nextClipData)` を直接呼ぶ
-7. page 遷移は発生せず、同一ページ内で次 clip に移る
-
-### 5. Disney+ の cross-URL playlist 継続
-
-1. `handlePlaylistEnd()` -> `playlistNextClip(playQueue, currentOrder)`
-2. current URL と next URL が異なる
-3. `beginAutoNavigation({ mode: "playlist", nextUrl, nextOrder, nextId })`
-4. `beginAutoNavigation()` が `autoNav`, `playmode`, `playClipSystemKey`, `playlistSystemKey`, `currentClipOrder`, `currentClipId` を保存する
-5. 同時に `markAutoNavigation("playlist")` が `extAutoNavigation` を立てる
-6. `window.location.href = url`
-7. 次ページで `loadAutoNav()` が `autoNav.ts` の TTL を検証する
-8. `startPreferredMode()` が `autoNav.mode === "playlist"` を見て playlist mode を復元する
-9. `clearAutoNavState()` が `autoNav` と `extAutoNavigation` を片付ける
-
-## API Contracts (Frontend-Observed)
-
-backend は repo 外です。以下は frontend が実際に読んでいる shape だけを記述します。
-
-### `POST http://localhost:3000/api/receive`
-
-- Caller:
-  - `common.js#sendData()`
-- Call sites:
-  - Netflix `openMemoSidebar(... onSave: sendData ...)`
-  - Disney+ `openMemoSidebar(... onSave: sendData ...)`
-- Body:
-  - `openMemoSidebar()` に渡された payload に `clipName` を追加したもの
-  - 具体的には `StartTime`, `EndTime`, `URL`, `service`, `user`, `title`, `epnumber`, `clipName` が観測される
-- Response:
-  - `response.json()` で消費
-  - field の中身は frontend で参照していないため `未確認`
-
-### `GET http://localhost:3000/api/random10`
-
-- Caller:
-  - `content_netflix.js#fetchDataAndRender()`
-- Response:
-  - `const data = await res.json()`
-  - `const items = data.allReceivedData || []`
-- `items[n]` から実際に読む field:
-  - `title`
-  - `epnumber`
-  - `user`
-  - `startTime`
-  - `endTime`
-  - `id`
-
-### `GET http://localhost:3000/api/fetchClip?id=...`
-
-- Caller:
-  - `content_netflix.js#selectClip(clipId)`
-- Response:
-  - `const raw = await res.text()`
-  - `const data = JSON.parse(raw)`
-- `redirectToClip(data)` が必須で読む field:
-  - `url`
-  - `service`
-  - `startTime`
-- `setClipDataOnCookies(data)` が optional に読む field:
-  - `title`
-  - `user`
-  - `endTime`
-  - `clipId`
-  - `username`
-- これ以外の response field は `未確認`
-
-## Message and Event Contracts
-
-| Contract | Sender | Receiver | Payload | Effect |
-|---|---|---|---|---|
-| `chrome.runtime.sendMessage({ type: "seek", sec })` | `common.js#requestSeek()` | `background.js` | `sec: number` | Netflix player を seek |
-| `chrome.runtime.sendMessage({ type: "HISTORY_CHANGE", data })` | Netflix `window.addEventListener("historyChange", ...)` | `background.js` | `{ method, url }` | 現状は log only |
-| `chrome.runtime.sendMessage({ type: "nf:init-bridge" })` | `content_netflix.js` | receiver は repo 内に見当たらない | none | no-op に見える |
-| `chrome.runtime.sendMessage({ type: "SET_SESSION_DATA", payload })` | `getClipData.js#safeSetStorage()` fallback | receiver は repo 内に見当たらない | arbitrary object | fallback が実際には接続されていない |
-| `window.postMessage({ type: "SET_CLIP_DATA", payload })` | 外部 localhost page | `getClipData.js` | `{ clip, playClipSystemKey? }` | `clip`, `playmode`, mode key を保存 |
-| `window.postMessage({ type: "PLAY_PLAYLIST_START" })` | 外部 localhost page | `getClipData.js` | none | `localStorage.playQueue` を extension state にコピーして遷移 |
-| `window.postMessage({ type: "EXT/SET_SESSION", payload })` | 外部 localhost page | `getClipData.js` | arbitrary object | 任意 key を `chrome.storage.local` へ保存 |
-| `CustomEvent("historyChange")` | `src/util/history_change.js` | `content_netflix.js` | `{ method, url }` | record state reset + `HISTORY_CHANGE` message |
-| `Event("locationchange")` | Disney `UI.hookHistory()` | Disney `UI.scheduleInjection()` | none | button reinjection |
-| `CustomEvent("clipSelected")` | 外部 localhost page | `getClipData.js` | none | `document.cookie` を読んで `clip` に保存 |
-| `CustomEvent("clipListElementsRendered")` | 外部 localhost page | `getClipData.js` | none | listener はあるが中身なし |
-
-## URL / Navigation Model
-
-### Service URL building
-
-この repo には 2 系統の URL builder があります。
-
-- `src/util/services.js`
-- `src/content/getClipData.js` 内の重複実装
-
-両方ともやっていること:
-
-- service alias を lowercase に正規化
-- relative URL を service base URL に変換
-- `t` query param を付与
-
-両者のズレ:
-
-- `common.js#detectService()` は `Hulu` を返しうる
-- しかし `util/services.js` と `getClipData.js` の URL builder は Hulu を扱わない
-- `util/services.js` は `amazon` を base URL に持つが、`getClipData.js` にはない
-
-### Same-URL vs cross-URL
-
-- 共通判定:
-  - `common.js#decideClipTransition(currentUrl, nextUrl)`
-  - 実装は単純に `currentUrl === nextUrl`
-- Netflix:
-  - same-URL は `requestSeek()` をリトライ
-  - cross-URL は `window.location.href = https://www.netflix.com${next.url}?t=...`
-- Disney+:
-  - same-URL は `Clip.play(nextClipData)`
-  - cross-URL は `buildClipUrl(nextUrl, startTime)` 後に `window.location.href`
-
-### Cookie scope
-
-`setCookie()` は単に `document.cookie = ...` を行うだけです。domain 指定も cross-origin 共有もありません。したがって、
-
-- Netflix で書いた cookie は Netflix origin の cookie
-- `localhost:3000` で `getCookies()` が読む cookie は localhost origin の cookie
-
-この 2 つは repo 内コードだけでは共有されません。
-
-## Async Model
+1. モジュール読み込み時に `createPlaybackOwnershipManager()` を生成
+2. 全リスナーを登録（message / alarms / tabs / connect / installed / startup）
+3. SW 起動ごとに `checkAndRefreshToken()` → `syncPendingQueue()` を直列実行（refresh 先行で旧トークンの 401 を避ける）
+4. `onInstalled` / `onStartup` で alarm を再作成し、`onStartup` では ownership を `reset()`
 
 ### Netflix
 
-- `onWindowLoad(callback)` が load 完了待ちを吸収する
-- `bootstrapRecordControls()` は `MutationObserver` で録画ボタン差し込みを維持する
-- `waitForVideoElement()` も `MutationObserver` で `<video>` 出現待ちをする
-- `monitorClipEnd()` は `timeupdate` で clip 終端を監視する
-- `startCountdownLogger()` は 1 秒ごとの `setInterval`
-- playlist same-URL seek は `for (;;)` + `await requestSeek()` + `await new Promise(r => setTimeout(r, 300))`
-- `beforeunload` cleanup は `isAutoNavigation()` で抑制される
+1. `dist/content.js` が `document_idle` で読み込まれる
+2. `initializeNetflixPlayback()` が 1 回だけ動く
+3. `onWindowLoad()` 内で `injectHistoryHook()`（MAIN world へ history hook）と録画 UI の `MutationObserver` を開始
+4. URL / sessionStorage から owner nonce を取り、`claimPlaybackOwnership()` を試みる
+5. 成功したら返ってきた snapshot で `init()`（clip）または `startPlaylistMode()`（playlist）を選ぶ
+6. `historyChange` で `handleOwnedPlaybackRouteChange()` を通し、自動遷移でなければ context を deactivate する
 
 ### Disney+
 
-- `UI.startObserver()` が UI 再注入用 `MutationObserver`
-- `UI.scheduleInjection()` は `requestAnimationFrame` で連打を抑える
-- `Clip.play()` は `setInterval` で再生位置取得可能になるまで待ち、その後 `startEndMonitor()` を開始する
-- `startEndMonitor()` は 500ms interval で end 到達を監視する
-- `loadAutoNav()` は `chrome.storage.local` から非同期復元し TTL を検証する
-- `beforeunload` cleanup は `isAutoNavigation()` または `autoNavCache` 有効時に抑制される
+1. `src/util/history_change.js` が `document_start` の MAIN world で hook を張る
+2. `dist/content_disney.js` が `document_idle` で読み込まれ、top-level IIFE が走る
+3. `UI.bootstrap()` が UI 注入 observer を、`Mode.bootstrap()` が `startPreferredMode()` を設定
+4. Netflix と同じく nonce → claim → snapshot の順で再生モードを復元する
 
-### Localhost bridge
+### localhost
 
-- `window.addEventListener("message", async ...)`
-- `safeSetStorage()` は `chrome.storage.local.set()` を試し、失敗時は background relay または `localStorage.ext_fallback` へ逃がす
-- playlist 開始は `setTimeout(..., 300)` 後に遷移する
+1. `src/content/extension_present.js` が MAIN world で `__CLIP_EXTENSION_PRESENT__` を立てる
+2. `dist/extension_link.js` が認証系 postMessage を待つ
+3. `dist/getClipData.js` が `clipSelected` / `SET_CLIP_DATA` / `PLAY_PLAYLIST_START` を待つ
+4. どの経路も検証 → `BEGIN_PLAYBACK_HANDOFF` → 結果 postMessage の順で処理する
 
 ## Risky / Fragile Areas
 
-### `src/content/content_netflix.js` が巨大で副作用密度が高い
+### `dist/` が実行物なのに git 管理外
 
-- 録画 UI
-- 一覧サイドバー
-- API fetch
-- clip 再生
-- playlist 再生
-- history hook 注入
-- beforeunload cleanup
+manifest は `dist/*` を読みますが `.gitignore` は `/dist` を無視します。source を直しただけでは反映されません。
 
-が 1 file に同居しています。小さな変更でも副作用範囲を広く見積もる必要があります。
+### 巨大ファイル 3 本
 
-### history hook が多重注入される
+`commentPanel.js`（1,303 行）、`content_disney.js`（1,134 行）、`content_netflix.js`（1,001 行）は責務が密集しています。小さな変更でも副作用範囲を広く見積もってください。
 
-`src/util/history_change.js` は次の 3 経路で入りえます。
+### DOM selector 依存
 
-- `manifest.json` の Netflix `document_end`
-- `src/inject/inject_script.js`
-- `content_netflix.js#injectHistoryHook("src/util/history_change.js")`
+- Netflix: `[data-uia="controls-standard"]`、`[data-uia="control-forward10"]`、`[data-uia="control-volume-*"]`、`[data-uia="video-title"]`
+- Disney+: overlay root / title bug / progress bar 系（shadow DOM 越しの取得を含む）
 
-`history_change.js` 自体に idempotency guard はありません。history API の二重パッチ前提で編集してはいけません。
+サービス側 UI 変更で即座に壊れます。
 
-### `dist/` が manifest 実行物なのに git ignore されている
+### 非公開 API 依存
 
-- manifest は `dist/content.js` と `dist/content_disney.js` を直接読む
-- しかし `.gitignore` は `/dist` を無視する
-- `git ls-files dist` は空
+`background.js` の seek は `window.netflix.appContext.state.playerApp.getAPI()` に依存します。Netflix 内部実装なので破壊的変更を検知できません。
 
-README を読んだ LLM は、「source 修正だけで extension が動く」と思ってはいけません。
+### history hook の注入経路が 2 本
 
-### Netflix `selectClip()` flow と `loadClipFromStorage()` flow が接続していない
+Netflix では `inject_script.js`（`document_end`）と `content_netflix.js#injectHistoryHook()` の両方から入ります。`history_change.js` 側に `__extHistoryChangeHooked__` guard があるため二重フックにはなりませんが、**この guard を消してはいけません。**
 
-- `selectClip()` は cookie を書くが `clip` storage は書かない
-- `init()` は `clip` storage を読む
-- `clipSelected` cookie reader は localhost origin 側
+### Netflix の `setClipDataOnCookies()` に repo 内 reader がいない
 
-これは改修時に見落としやすい、実フロー上の大きな不整合です。
+`selectClip()` は Netflix origin へ Cookie を書きますが、遷移先の再生は ownership snapshot から復元されるため、この Cookie を読むコードは repo 内にありません。サイト側が読んでいる可能性があるので、確認せずに削除しないでください。
 
-### `currentClipId` と `nextClip` は writer はあるが reader がない
+### service enum の drift
 
-- `currentClipId`
-- `nextClip`
+`detectService()` は `Netflix` / `Disney+` / `Prime Video` / `YouTube` / `Hulu` / `Unknown` を返します。一方 `services.js#SERVICE_BASE_URL` に Hulu はなく、再生ブリッジ契約 v1 は `netflix` / `disneyplus` しか受け付けません。**対応サービスを増やすときは manifest・再生制御・validator・契約バージョンを同時に更新してください。**
 
-今の repo では write-only です。安易に「重要 state」と仮定して使わないこと。
+## Editing Guidelines
 
-### Netflix seek は active tab 前提
+### 比較的安全
 
-`background.js` は `sender.tab` を使わず、`chrome.tabs.query({ active: true, currentWindow: true })` の tab に対して seek します。対象タブが非アクティブなら no-op / 誤対象の可能性があります。
+- `src/api.js` の base URL
+- `src/css/content_button.css`、Disney+ の `ensureStyle()` 内 CSS
+- ボタン label、サイドバー title、console message
 
-### 名前が似ているが責務が違う関数がある
+### 高リスク
 
-- `common.js#openMemoSidebar()`
-  - 録画保存用
-- `content_netflix.js#openSidebar()`
-  - 記録一覧表示用
+| 領域 | 一緒に確認するファイル |
+|---|---|
+| 再生所有権 | `shared/playbackBridgeValidation.js`、`background/playbackOwnership.js`、`content/playbackOwnership.js`、`content/playbackContext.js` |
+| 入力契約 | 上記 + `content/getClipData.js` + `docs/localhost-playback-bridge-contract-v1.md` |
+| 認証 | `background/authState.js`、`authMutex.js`、`instanceId.js`、`content/extension_link.js`、`content/extensionSync.js` |
+| 同期 | `background/sync.js`、`request.js`、`shared/storage.js` |
+| コメント | `content/commentPanel.js`、`background/comments.js`、`shared/commentText.js` |
+| seek | `content/common.js#requestSeek()`、`background/background.js#handleSeekMessage()` |
+| 自動遷移 | `content/common.js` の marker 3 関数、両 content の route change 処理 |
 
-同じ「sidebar」でも役割が違うため、統合や共通化を前提にしてはいけません。
+### 変更前チェックリスト
 
-## Editing Guidelines for LLMs
+1. **入力契約を変える前** — `docs/localhost-playback-bridge-contract-v1.md` を先に読む。validator を緩めて実データに合わせるのではなく、サイト側を直すか契約バージョンを上げる
+2. **storage キーを変える前** — 再生系 9 キーは ownership manager 経由でのみ書かれる前提を壊さない
+3. **メッセージ型を変える前** — サイト側（`C:\dev\react--site`）の producer / consumer を実ファイルで確認する
+4. **source を変えた後** — `npm run build` → `npm run lint` → `npm test` を必ず通す
 
-### Safe to edit first
+### 雑に「整理」してはいけないもの
 
-次は比較的安全です。とはいえ影響確認は必要です。
+- `playbackContext.js` の `initialized` / `context: null` の 2 状態の区別
+- `markAutoNavigation()` の nonce + route 束縛（`localStorage` へ戻さない）
+- background 側の再検証（content を信用する形に簡略化しない）
+- `acceptedItemIds` の厳密検証
+- コメント応答の `userId: null` 許容
+- `history_change.js` の idempotency guard
+- `extension_link.js` の `TRUSTED_ORIGINS`
 
-- `src/api.js`
-  - API base URL の変更
-- `src/css/content_button.css`
-  - 録画ボタン hover 見た目
-- Disney+ のボタン見た目
-  - `content_disney.js` の `ensureStyle()` 内 CSS
-- 文言変更
-  - ボタン label, サイドバー title, console message
+## テスト
 
-### High-risk areas
+`test/` に 15 ファイル・143 tests があります。`node --test` で全件実行されます。
 
-- storage key 名
-  - `clip`, `playQueue`, `currentClipOrder`, `currentClipId`, `playClipSystemKey`, `playlistSystemKey`, `playmode`, `autoNav`
-- history / navigation
-  - `history_change.js`, `inject_script.js`, `content_netflix.js`, `content_disney.js`
-- Netflix seek bridge
-  - `common.js#requestSeek()`, `background.js`, `content_netflix.js`
-- URL builder
-  - `src/util/services.js`, `src/content/getClipData.js`
-- side-effect `window.*` SVG module
-  - `src/image/*.js`
+| ファイル | 対象 |
+|---|---|
+| `playbackBridgeValidation.test.js` | 入力検証器 |
+| `playbackOwnership.test.js` | background 所有権マネージャ |
+| `playbackOwnershipClient.test.js` | content 所有権クライアント |
+| `playbackContext.test.js` | タブ固有 context |
+| `getClipData.test.js` | localhost 再生ブリッジ 3 経路 |
+| `comments.test.js` / `commentPanel.test.js` | コメント通信と UI |
+| `backgroundAuth.test.js` / `backgroundRequest.test.js` / `backgroundDetachedTasks.test.js` | 認証直列化・timeout・detached task |
+| `manifest.test.mjs` | MAIN world hook の順序、Netflix の isolated hook 重複防止、bundle 参照、権限境界 |
+| `content/common.test.mjs` | メモサイドバーのライフサイクル（再オープン・supersede・teardown） |
+| `content/integrationHelpers.test.mjs` | 自動遷移マーカーのタブ間分離、video 待機のキャンセル、選択クリップの原子的 commit |
+| `historyChange.test.mjs` / `icons.test.js` | history hook・アイコン |
 
-### Mandatory checklist before editing
+新しい不変条件を入れたら、対応するテストも足してください。
 
-#### 1. Field 名を変える前
+## 推奨読解順
 
-最低でも次を全検索すること。
-
-```text
-startTime
-starttime
-StartTime
-endTime
-endtime
-EndTime
-url
-URL
-Url
-clipName
-clipname
-user
-username
-id
-clipId
-```
-
-更新対象:
-
-- `openMemoSidebar()`
-- `content_netflix.js#loadClipFromStorage()`
-- `content_netflix.js#setClipDataOnCookies()`
-- `content_disney.js#normalizeClipData()`
-- `content_disney.js#normalizeClipUrl()`
-- `getClipData.js#getCookies()`
-
-#### 2. Service 名を変える前
-
-最低でも次をセットで見ること。
-
-- `common.js#detectService()`
-- `util/services.js#normalizeService()`
-- `util/services.js#buildServiceUrl()`
-- `getClipData.js` 内の `normalizeService()` / `buildServiceUrl()`
-
-片側だけ直すと service enum drift が拡大します。
-
-#### 3. Playback mode を変える前
-
-次の key をすべて横断検索すること。
-
-```text
-playClipSystemKey
-playlistSystemKey
-playmode
-currentClipOrder
-currentClipId
-autoNav
-extAutoNavigation
-```
-
-特に `beforeunload` cleanup と自動遷移抑制は一緒に確認すること。
-
-#### 4. Netflix seek を変える前
-
-次をまとめて確認すること。
-
-- `common.js#requestSeek()`
-- `background.js` `onMessage("seek")`
-- `content_netflix.js#playlistNextClip()`
-- `content_netflix.js#monitorClipEnd()`
-- `content_netflix.js#startUIWarmer()`
-
-#### 5. Source を変えた後
-
-- `npx webpack` が必要
-- manifest は `dist/*` を読む
-- `dist/` が git ignore されているので、working tree だけ見ても反映物が管理されない可能性がある
-
-### Things you should not “clean up” casually
-
-- field casing の統一
-- `window.*` SVG helper の撤去
-- `history_change.js` の削除や注入経路整理
-- `clipSelected` / cookie 経路の削除
-- `nextClip`, `currentClipId` の削除
-
-これらは見た目には負債でも、外部 localhost page や未同梱 backend 契約にぶら下がっている可能性があります。削除ではなく、まず read/write 実態と外部依存を確認すること。
-
-## Anti-Patterns / Smells
-
-- URL builder が二重実装
-  - `src/util/services.js`
-  - `src/content/getClipData.js`
-- history hook の多重注入
-  - `manifest.json`
-  - `src/inject/inject_script.js`
-  - `content_netflix.js#injectHistoryHook()`
-- callback と async/await が混在
-  - Netflix / Disney / background 全体
-- hardcoded user 名
-  - Netflix: `"test_user"`
-  - Disney+: `"testUser"`
-- write-only state
-  - `currentClipId`
-  - `nextClip`
-- receiver が存在しない message
-  - `nf:init-bridge`
-  - `SET_SESSION_DATA`
-- side-effect import 依存
-  - `window.createSVG`
-  - `window.createMoreDetailSVG`
-  - `window.LoopButtonSVG`
-- field casing の揺れ
-  - `StartTime` vs `startTime` vs `starttime`
-  - `URL` vs `url` vs `Url`
-  - `clipName` vs `clipname`
-- service enum drift
-  - `detectService()` は `Hulu` を返しうる
-  - URL builder は Hulu 未対応
-- 生成物依存なのに `/dist` が ignore
-- placeholder / 未使用コード
-  - `content_netflix.js#ensureClipTagInURL()`
-  - `content_netflix.js#reloadPageFromScript()`
-  - `content_netflix.js#getLoopPlaylist()`
-  - `content_disney.js#myCustomActionRight2()`
-  - `background.js` の `let playClipSystemKey = "initialValue"`
-  - `content_netflix.js` の `togglekey` は見た目以外の動作に接続していない
-
-## API / UI / Playback Boundaries You Should Respect
-
-- 録画保存 UI 共通化境界:
-  - `common.js#openMemoSidebar()`
-- サービス固有録画境界:
-  - Netflix `bootstrapRecordControls()`
-  - Disney `myCustomActionLeft()`
-- URL 遷移境界:
-  - `services.js` / `getClipData.js` URL builder
-  - `handleClipTransition()`
-- Netflix player 直アクセス境界:
-  - `background.js` only
-- 外部 localhost page 契約境界:
-  - `getClipData.js`
-
-## Known Unknowns / External Contracts
-
-- `http://localhost:3000` の page 実装は repo にない
-- `/api/receive`, `/api/random10`, `/api/fetchClip` の backend 実装は repo にない
-- `clipSelected` / `clipListElementsRendered` / `window.postMessage(...)` の送信元 page は repo にない
-- `nf:init-bridge` と `SET_SESSION_DATA` の receiver は repo 内にない
-- Netflix cookie -> localhost cookie の橋渡しは repo 内にない
-
-したがって、次は `推定` 扱いにすること。
-
-- `clipSelected` cookie 経路が外部 page で補完されているかどうか
-- `nextClip` / `currentClipId` を参照する外部コードの有無
-- backend が受け取る / 返す追加 field の意味
-
-## Recommended Reading Order for LLMs
-
-### 1. Execution map を固める
-
-1. `manifest.json`
-2. `webpack.config.js`
-
-ここで「どのファイルが実際にブラウザで動くか」を確定する。
-
-### 2. Shared contract を読む
-
-3. `src/content/common.js`
-4. `src/api.js`
-5. `src/util/services.js`
-
-ここで API base URL、seek 契約、自動遷移フラグ、service 正規化を把握する。
-
-### 3. Netflix flow を読む
-
-6. `src/content/content_netflix.js`
-7. `src/util/history_change.js`
-8. `src/inject/inject_script.js`
-9. `src/image/*.js`
-
-ここで最も壊れやすい monolith の挙動を読む。
-
-### 4. Disney flow を読む
-
-10. `src/content/content_disney.js`
-
-ここでより整理された clip / playlist state machine を読む。
-
-### 5. External bridge と background bridge を読む
-
-11. `src/content/getClipData.js`
-12. `src/background/background.js`
-13. `src/util/cookies.js`
-14. `src/types/clip.js`
-
-ここで localhost 契約、Netflix MAIN-world bridge、field shape を確認する。
-
-## Quick Mental Model for Safe Changes
-
-この repo を安全に触るときの最短モデルは次です。
-
-1. mode の正本は `chrome.storage.local`
-2. DOM へのボタン差し込みは `MutationObserver`
-3. 動画終端監視は Netflix は `timeupdate`、Disney+ は `setInterval`
-4. same-URL 遷移は seek、cross-URL 遷移は storage 更新後 `window.location.href`
-5. cleanup から mode を守るために `extAutoNavigation` / `autoNav` がある
-6. Netflix の player 直操作は background `MAIN` world bridge でしかできない
-7. `localhost:3000` 契約は repo 外で、ここが最も不確定
+1. `manifest.json` と `webpack.config.js` — 何が実際に動くかを確定する
+2. `docs/localhost-playback-bridge-contract-v1.md` — 外部入力の契約
+3. `src/shared/playbackBridgeValidation.js` — その実装
+4. `src/background/playbackOwnership.js` と `src/content/playbackOwnership.js` — 所有権モデル
+5. `src/content/playbackContext.js` — タブ固有 context
+6. `src/background/background.js` — 全体の配線
+7. `src/content/getClipData.js` と `src/content/extension_link.js` — サイトとの 2 つの境界
+8. `src/content/common.js` — 共有 UI とヘルパ
+9. `src/content/content_netflix.js` / `content_disney.js` — サービス実装
+10. `src/content/commentPanel.js` と `src/background/comments.js` — コメント機能
+11. `src/background/sync.js` / `tokenRefresh.js` / `authState.js` — 同期と認証
+
+## Quick Mental Model
+
+1. 再生状態の正本は **background の ownership registry**。`chrome.storage.local` はその投影にすぎない
+2. どのタブが再生中かは **owner nonce**（URL query → sessionStorage）で決まる
+3. コメントの投稿先は **タブ固有 playback context** で決まり、global state からは決まらない
+4. サイトからの入力はすべて信頼しない。content と background が**同じ検証器**で二重に弾く
+5. サイト API への fetch は**必ず background**。content から直接叩くと CORS で落ちる
+6. Netflix の player 直操作は background の MAIN world bridge でしかできない
+7. 自動遷移マーカーは nonce + route に束縛された one-shot で、タブをまたがない
