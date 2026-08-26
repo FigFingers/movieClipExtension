@@ -39,10 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-CODE_ISSUES_FOR_LLM.md
-
-# local analysis / docs (not tracked)
-/docs
+# local analysis / docs (the playback contract is the repository exception)
+/docs/*
+!/docs/localhost-playback-bridge-contract-v1.md
 /documentation
 
 # claude code local files
