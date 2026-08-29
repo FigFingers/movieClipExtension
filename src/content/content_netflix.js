@@ -94,7 +94,6 @@ function initializeNetflixPlayback() {
   const COLOR_DEFAULT = ICON_COLOR_DEFAULT;
   const COLOR_LOOPING = ICON_COLOR_ACTIVE;
   let isLooping = false;
-  let togglekey = false;
   let uiWarmerInterval = null;
   let activePlaybackOwnerNonce = null;
   let playbackLocation = null;
@@ -161,6 +160,7 @@ function initializeNetflixPlayback() {
     clipData = null;
     activePlaylistQueue = null;
     activePlaylistOrder = null;
+    syncPlayNextButtonState();
   }
 
   function stopPlaybackRuntime() {
@@ -366,10 +366,24 @@ function initializeNetflixPlayback() {
     btn.appendChild(svgIcon);
     btn.style.cursor = "pointer";
     btn.addEventListener("click", () => {
-      togglekey = !togglekey;
-      svgIcon.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
+      if (!isPlaylistModeActive()) return;
+      void playlistNextClip(activePlaylistQueue, activePlaylistOrder ?? 0);
     });
     return { btn, svg: svgIcon };
+  }
+
+  function isPlaylistModeActive() {
+    return Array.isArray(activePlaylistQueue) && activePlaylistQueue.length > 0;
+  }
+
+  // プレイリスト再生中しか進める先が無いため、それ以外では押せなくする
+  function syncPlayNextButtonState() {
+    const btn = document.getElementById(NEXT_BUTTON_ID);
+    if (!btn) return;
+    const enabled = isPlaylistModeActive();
+    btn.disabled = !enabled;
+    btn.style.cursor = enabled ? "pointer" : "not-allowed";
+    btn.style.opacity = enabled ? "1" : "0.4";
   }
 
   function createCommentButton() {
@@ -446,7 +460,7 @@ function initializeNetflixPlayback() {
       markExtUi(commentButton);
 
       loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
-      playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
+      playSvg.style.color = COLOR_DEFAULT;
       commentSvg.style.color = isCommentPanelOpen() ? COLOR_LOOPING : COLOR_DEFAULT;
 
       const wrapper = document.createElement("div");
@@ -465,6 +479,7 @@ function initializeNetflixPlayback() {
       wrapper.appendChild(commentButton);
 
       anchorBtn.parentNode.after(wrapper);
+      syncPlayNextButtonState();
 
       const spacer = document.createElement("div");
       spacer.style.minWidth = "3rem";
@@ -724,6 +739,7 @@ function initializeNetflixPlayback() {
       }
       activePlaylistQueue = playQueue;
       activePlaylistOrder = currentClip.order;
+      syncPlayNextButtonState();
       clipData = {
         startTime: Number(currentClip.startTime ?? currentClip.starttime),
         endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
@@ -760,6 +776,7 @@ function initializeNetflixPlayback() {
     if (!transitioned) return;
     activePlaylistQueue = sortedQueue;
     activePlaylistOrder = next.order;
+    syncPlayNextButtonState();
 
     clipData = {
       startTime: Number(next.startTime ?? next.starttime),
