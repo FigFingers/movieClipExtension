@@ -171,8 +171,8 @@ import {
     const STYLE_ID = 'dext-control-style';
 
     const BUTTONS = [
-      { id: 'dext-left-button', area: 'left', label: 'Left Button', action: myCustomActionLeft },
-      { id: 'dext-right-button-1', area: 'right', label: 'Right Button 1', action: myCustomActionRight1 },
+      { id: 'dext-left-button', area: 'left', label: '録画', action: myCustomActionLeft },
+      { id: 'dext-right-button-1', area: 'right', label: 'ループ', action: myCustomActionRight1 },
       {
         id: 'dext-right-button-2',
         area: 'right',
