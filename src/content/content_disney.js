@@ -2,6 +2,7 @@ import {
   clearAutoNavigation,
   detectService,
   EXT_UI_CLASS,
+  formatSeconds,
   handleOwnedPlaybackRouteChange,
   markAutoNavigation,
   markExtUi,
@@ -622,16 +623,6 @@ import {
   const Service = (() => {
     const DPlusTime = (() => {
 
-      function formatTime(sec) {
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = sec % 60;
-
-        return h > 0
-          ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-          : `${m}:${String(s).padStart(2, "0")}`;
-      }
-
       function getTime() {
         // aria-valuenow/valuemax（秒）は .progress-bar__seekable-range 側に付く。
         const slider = getProgressSlider();
@@ -645,8 +636,8 @@ import {
         return {
           currentSeconds: current,
           totalSeconds  : total,
-          currentTime   : formatTime(current),
-          totalTime     : formatTime(total),
+          currentTime   : formatSeconds(current),
+          totalTime     : formatSeconds(total),
           progress      : `${((current / total) * 100).toFixed(2)}%`
         };
       }

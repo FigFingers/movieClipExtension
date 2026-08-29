@@ -10,6 +10,7 @@ import {
   closeMemoSidebar,
   createElementWait,
   detectService,
+  formatSeconds,
   handleClipTransition,
   handleOwnedPlaybackRouteChange,
   markAutoNavigation,
@@ -552,7 +553,7 @@ function initializeNetflixPlayback() {
       const userRow = document.createElement("div");
       userRow.textContent = `ユーザー: ${item.user}`;
       const rangeRow = document.createElement("div");
-      rangeRow.textContent = `範囲: ${formatTime(item.startTime)} - ${formatTime(item.endTime)}`;
+      rangeRow.textContent = `範囲: ${formatSeconds(item.startTime)} - ${formatSeconds(item.endTime)}`;
       entry.append(heading, userRow, rangeRow);
       const jumpBtn = document.createElement("button");
       jumpBtn.textContent = "▶ このClipへジャンプ";
@@ -579,12 +580,6 @@ function initializeNetflixPlayback() {
       container.textContent = "データの取得に失敗しました。";
       console.error("API取得に失敗しました");
     }
-  }
-
-  function formatTime(sec) {
-    const s = Math.floor(sec % 60).toString().padStart(2, "0");
-    const m = Math.floor(sec / 60);
-    return `${m}:${s}`;
   }
 
   // ---------------------------------------------------------------------------
