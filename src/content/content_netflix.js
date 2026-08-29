@@ -76,6 +76,8 @@ function initializeNetflixPlayback() {
   /** @type {ClipDataProps | null} */
   let clipData = null;
   const EPSILON = 0.05;
+  // シークが収束しないまま無限に回らないための締切
+  const SEEK_RETRY_TIMEOUT_MS = 10000;
   let countdownIntervalId = null;
 
   const BUTTON_ID = "nf-loop-toggle-btn";
@@ -774,6 +776,8 @@ function initializeNetflixPlayback() {
         startUIWarmer();
         const targetTime = Math.floor(next.startTime);
 
+        const seekDeadline = Date.now() + SEEK_RETRY_TIMEOUT_MS;
+
         for (;;) {
           if (transitionGeneration !== playbackGeneration) return;
           try {
@@ -789,6 +793,15 @@ function initializeNetflixPlayback() {
           if (Math.abs(currentSec - targetTime) <= 1) {
             stopUIWarmer();
             break;
+          }
+
+          if (Date.now() >= seekDeadline) {
+            stopUIWarmer();
+            console.warn(
+              "[Playlist] シークが収束しないため中断:",
+              { targetTime, currentSec }
+            );
+            return;
           }
         }
 
