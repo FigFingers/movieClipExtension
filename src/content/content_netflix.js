@@ -248,8 +248,7 @@ function initializeNetflixPlayback() {
               StartTime: startTime,
               EndTime: endTime,
               URL: window.location.pathname,
-              service: detectService(),
-              user: "test_user"
+              service: detectService()
             };
 
             if (allTitleName) {

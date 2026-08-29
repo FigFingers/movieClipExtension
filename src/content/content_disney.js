@@ -433,7 +433,6 @@ import {
 
         const payload = {
           clipName: clipName,
-          user: "testUser",
           service: detectService(),
           StartTime: starttime,   // Netflix 形式に合わせる
           EndTime: endtime,       // Netflix 形式に合わせる
