@@ -1,6 +1,7 @@
 /**
  * @typedef {Object} ClipDataProps
  * @property {string} [title]
+ * @property {string} [clipName]
  * @property {string} [user]
  * @property {string|number} [startTime]
  * @property {string|number} [endTime]

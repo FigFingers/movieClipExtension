@@ -63,6 +63,20 @@ export function formatSeconds(seconds = 0) {
     : `${m}:${String(s).padStart(2, '0')}`;
 }
 
+// Netflix のタイトル要素は文字間に U+FEFF / U+200B が挿入されることがある
+export function cleanTitleText(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\uFEFF\u200B]/g, '').trim();
+}
+
+// メモ欄の初期値。エピソードタイトルが取れない動画では作品名だけを返す
+export function buildClipName(seriesTitle, episodeTitle) {
+  const series = cleanTitleText(seriesTitle);
+  const episode = cleanTitleText(episodeTitle);
+  if (series && episode) return `${series}｜${episode}`;
+  return series || episode;
+}
+
 export function decideClipTransition(currentUrl, nextUrl) {
   return currentUrl === nextUrl ? 'seek' : 'navigate';
 }

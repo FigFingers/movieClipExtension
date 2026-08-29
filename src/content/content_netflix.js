@@ -9,6 +9,8 @@ import {
   clearAutoNavigation,
   closeMemoSidebar,
   createElementWait,
+  buildClipName,
+  cleanTitleText,
   detectService,
   formatSeconds,
   handleClipTransition,
@@ -256,15 +258,21 @@ function initializeNetflixPlayback() {
 
             if (allTitleName) {
               const h4Element = allTitleName.querySelector("h4");
+              // span[0] = 話数、span[1] = エピソードタイトル。片方しか無い動画もある
+              const spans = allTitleName.querySelectorAll("span");
+              const episodeTitle = cleanTitleText(spans[1]?.textContent);
+
               if (h4Element) {
-                payload.title = h4Element.textContent;
-                const episodeNumberElement = allTitleName.querySelector("span:nth-of-type(1)");
-                if (episodeNumberElement) {
-                  payload.epnumber = episodeNumberElement.textContent;
+                payload.title = cleanTitleText(h4Element.textContent);
+                const episodeNumber = cleanTitleText(spans[0]?.textContent);
+                if (episodeNumber) {
+                  payload.epnumber = episodeNumber;
                 }
               } else {
-                payload.title = allTitleName.textContent;
+                payload.title = cleanTitleText(allTitleName.textContent);
               }
+
+              payload.clipName = buildClipName(payload.title, episodeTitle);
             } else {
               throw new Error("タイトル要素が見つかりません。");
             }
