@@ -66,7 +66,7 @@
 | High #5 | background seek が active tab 前提で誤タブに飛ぶ | `sender.tab` を優先し、取れないときだけ active tab へフォールバック。さらに対象 URL が `netflix.com/watch/` でなければ `not_netflix_watch` で中断 | `src/background/background.js#handleSeekMessage()` |
 | High #7 | API / page 由来の文字列を `innerHTML` に入れている（XSS / issue #96・#97） | `textContent` + DOM 組み立てへ置換。`innerHTML` が残るのは `src/ui/icons.js` のファイル内定数のみ | `src/content/common.js:198`, `src/content/content_netflix.js:548`, `src/ui/icons.js:81` |
 | High #8 | localhost の全 cookie を `chrome.storage.local.clip` に移している | 許可リスト方式へ変更。契約 v1 に列挙されたキーだけを個別に `decodeURIComponent` する。malformed percent encoding は該当キーを無効化し、必須 field の欠落・不正や optional 文字列の上限超過は message 全体を拒否する | `src/shared/playbackBridgeValidation.js#parsePlaybackCookies()` |
-| Medium #1 | `sendData()` が `response.ok` を見ずに `response.json()` を呼ぶ | 保存同期の直接 fetch を廃止。`sendData()` は queue へ積んで background 同期を要求し、通信は `fetchJsonWithTimeout` + status 分岐が担う。`random10` / `fetchClip` は引き続き Netflix content から直接 fetch する | `src/content/common.js#sendData()`, `src/background/sync.js`, `src/background/request.js`, `src/content/content_netflix.js` |
+| Medium #1 | `sendData()` が `response.ok` を見ずに `response.json()` を呼ぶ | 保存同期の直接 fetch を廃止。`sendData()` は queue へ積んで background 同期を要求し、通信は `fetchJsonWithTimeout` + status 分岐が担う。記録一覧も `FETCH_CLIP_LIST` で background に移し、content からのサイト API 直接 fetch は無くなった | `src/content/common.js#sendData()`, `src/background/sync.js`, `src/background/request.js`, `src/content/content_netflix.js` |
 | Medium #3 | `SET_SESSION_DATA` fallback message に受信側がない | fallback 経路ごと削除。`getClipData.js` は storage を直接触らず `BEGIN_PLAYBACK_HANDOFF` のみ送る | `src/content/getClipData.js` |
 | Medium #4 | `setStorageAsync()` が Netflix file 内で二重定義されている | 定義自体が消滅（storage 書き込みは ownership manager 経由に一本化） | `src/content/content_netflix.js` |
 | Medium #5 | 未使用の入り口が残っている（`getLoopPlaylist()` / `loadPlaylistClip()`） | 両関数とも削除済み | `src/content/content_netflix.js`, `src/content/content_disney.js` |
@@ -111,12 +111,9 @@
 - どう壊れるか: playlist mode では `loadClipData()` が clip を返さず、loop toggle が実質 no-op になる。
 - 改善方針: loop の責務を `Mode` / `Playlist` に寄せて一元化する。
 
-### 4. clip 一覧が `item.id` にしか依存していない
+### 4. clip 一覧が `item.id` にしか依存していない（解消済み）
 
-- 問題: `src/content/content_netflix.js#renderClipList()` は `onSelect?.(item.id)` だけを使う。
-- なぜ危険か: repo 内には `id` と `clipId` の両形が存在する。
-- どう壊れるか: backend が `clipId` だけ返した場合 `fetchClip?id=undefined` になる。
-- 改善方針: `item.id ?? item.clipId` を使うか、`GET /api/random10` の contract を固定する。
+- 対応: `background/clips.js#normalizeClipListItem()` が `id` と `clipId` の両方を必ず埋めた形へ正規化し、`renderClipList()` は clip オブジェクトごと `onSelect` へ渡すようになった。単体取得（旧 `fetchClip`）自体が無くなったため `id=undefined` の経路も消えている。
 
 ### 5. localhost URL が複数箇所に散っている
 
@@ -164,7 +161,7 @@
 
 入口で契約が固定されていない経路:
 
-- `GET /api/random10` → `renderClipList()`（`item.id` 直参照。Medium Risk #4）
+- なし（`GET /api/v1/clips` の応答は `background/clips.js#normalizeClipListItem()` で正規化してから content へ渡す）
 
 `toExtensionClipPayload()` は `startTime` / `StartTime` などの alias を受けるが、保存同期用の canonical payload を返す正規化境界である。再生ブリッジとは別契約なので、`clipName` と `clipname` を一律に置換しない。
 
@@ -211,8 +208,8 @@
 ### サイトとの契約は明文化されたが、拡張側にしか無い部分が残る
 
 - 対応済み: 再生ハンドオフは `docs/localhost-playback-bridge-contract-v1.md` に、認証連携は PR #115 で明確化。
-- 未対応: `GET /api/random10` と `GET /api/fetchClip` の応答 shape は拡張が読む範囲しか分かっていない。
-- 改善方針: この 2 API も契約として書き出す。サイト側の実ファイルとコミットで裏を取る。
+- 対応済み: 記録一覧はサイトの `GET /api/v1/clips` へ移行し、拡張が依存する項目は `background/clips.js#normalizeClipListItem()` と `test/backgroundClips.test.js` に固定した。
+- 未対応: サイト側は Prisma の `include: { user: true }` をそのまま返すため、応答には拡張が使わない user の全カラムが含まれる（サイト issue #55）。正規化で捨てているが、サイト側が絞れば正規化も追随させる。
 
 ## Fragile Areas
 
@@ -266,28 +263,24 @@
 
 短時間で効果が出やすいものです。
 
-1. `renderClipList()` を `item.id ?? item.clipId` にする
-   理由: 1 行で `fetchClip?id=undefined` を防げる。
-2. Netflix の `wrapButton` を撤去対象に含める
+1. Netflix の `wrapButton` を撤去対象に含める
    理由: ボタン撤去後の orphan wrapper を残さずに済む。影響範囲が狭い。
-3. `manifest.json` の `description` と `package.json` のメタデータを実態に合わせる
+2. `manifest.json` の `description` と `package.json` のメタデータを実態に合わせる
    理由: 配布時に見える文言なので、コストの割に効果が分かりやすい。
-4. Disney+ のボタン label を動作ベースの名前に変える
+3. Disney+ のボタン label を動作ベースの名前に変える
    理由: 仕様理解コストが下がる。
 
 ## Suggested Refactor Order
 
 1. 表面的な誤読要因を消す
-   対象: `item.id` フォールバック、`wrapButton` cleanup、placeholder メタデータ、Disney+ label
+   対象: `wrapButton` cleanup、placeholder メタデータ、Disney+ label
 2. サービス enum を 1 本化する
    対象: `src/content/common.js#detectService()`、`src/util/services.js`、`src/shared/playbackBridgeValidation.js`
-3. 残る API 契約を書き出す
-   対象: `GET /api/random10`、`GET /api/fetchClip`
-4. Disney+ の loop と playlist を 1 系統に寄せる
+3. Disney+ の loop と playlist を 1 系統に寄せる
    対象: `content_disney.js` の `Mode` / `Playlist`
-5. 巨大ファイルを分割する
+4. 巨大ファイルを分割する
    対象: `content_netflix.js` → 録画 / 一覧 / clip / playlist / navigation
-6. 保存失敗のユーザー通知を足す
+5. 保存失敗のユーザー通知を足す
    対象: `common.js#openMemoSidebar()`
 
 **再生所有権・入力検証・認証まわりは現状で意図した設計になっている。リファクタ対象に入れない。**

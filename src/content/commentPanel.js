@@ -10,6 +10,7 @@ import {
   COMMENT_BODY_MAX_CODE_POINTS,
   isValidCommentBody,
 } from '../shared/commentText.js';
+import { sendRuntimeMessage } from './runtimeMessage.js';
 
 export const COMMENT_PANEL_ID = 'ext-comment-panel';
 export const COMMENT_PANEL_OPEN_STATE_EVENT =
@@ -287,36 +288,6 @@ export function resolveCurrentClipIdFromState(state = {}) {
 export async function resolveCurrentClipId() {
   const localPlayback = readPlaybackContext();
   return localPlayback.context?.clipId ?? null;
-}
-
-function sendRuntimeMessage(message) {
-  return new Promise((resolve) => {
-    const runtime = globalThis.chrome?.runtime;
-    if (!runtime?.sendMessage) {
-      resolve({ ok: false, reason: 'background_unavailable' });
-      return;
-    }
-
-    try {
-      runtime.sendMessage(message, (response) => {
-        if (runtime.lastError) {
-          resolve({
-            ok: false,
-            reason: 'background_unavailable',
-            message: runtime.lastError.message,
-          });
-          return;
-        }
-        resolve(response || { ok: false, reason: 'request_failed' });
-      });
-    } catch (error) {
-      resolve({
-        ok: false,
-        reason: 'background_unavailable',
-        message: error?.message,
-      });
-    }
-  });
 }
 
 function createElement(tagName, text) {

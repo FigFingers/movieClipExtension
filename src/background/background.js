@@ -2,6 +2,7 @@ import {
   fetchClipComments,
   postClipComment,
 } from './comments.js';
+import { fetchClipList } from './clips.js';
 import { createPlaybackOwnershipManager } from './playbackOwnership.js';
 import {
   saveExtensionAuthTokenInBackground,
@@ -95,6 +96,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return respondToAsyncRequest(fetchClipComments({
       clipId: message.clipId,
       cursor: message.cursor,
+      limit: message.limit,
+    }), sendResponse);
+  }
+
+  if (message?.type === 'FETCH_CLIP_LIST') {
+    return respondToAsyncRequest(fetchClipList({
+      title: message.title,
       limit: message.limit,
     }), sendResponse);
   }

@@ -2,6 +2,7 @@ import {
   PLAYBACK_OWNER_QUERY_PARAM,
   PLAYBACK_OWNER_STORAGE_KEY,
 } from '../shared/playbackBridgeValidation.js';
+import { sendRuntimeMessage as sendMessage } from './runtimeMessage.js';
 
 export { PLAYBACK_OWNER_QUERY_PARAM, PLAYBACK_OWNER_STORAGE_KEY };
 export const PLAYBACK_OWNER_TAB_KEY = 'dextPlaybackOwnerTab';
@@ -16,27 +17,6 @@ function readPlaybackOwnerQuery(url = globalThis.location?.href) {
   } catch {
     return { present: false, value: null };
   }
-}
-
-function sendMessage(message) {
-  return new Promise((resolve) => {
-    const runtime = globalThis.chrome?.runtime;
-    if (!runtime?.sendMessage) {
-      resolve({ ok: false, reason: 'background_unavailable' });
-      return;
-    }
-    try {
-      runtime.sendMessage(message, (response) => {
-        if (runtime.lastError) {
-          resolve({ ok: false, reason: 'background_unavailable' });
-          return;
-        }
-        resolve(response || { ok: false, reason: 'request_failed' });
-      });
-    } catch {
-      resolve({ ok: false, reason: 'background_unavailable' });
-    }
-  });
 }
 
 export function createPlaybackOwnerNonce() {

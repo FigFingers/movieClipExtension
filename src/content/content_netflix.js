@@ -4,7 +4,6 @@ import {
   COLOR_DEFAULT as ICON_COLOR_DEFAULT,
   createIcon
 } from "../ui/icons.js";
-import { getApiEndpoint } from './../api.js';
 import {
   clearAutoNavigation,
   closeMemoSidebar,
@@ -37,6 +36,7 @@ import {
   setPlaybackContext
 } from './playbackContext.js';
 import { commitSelectedClip } from './netflixClipSelection.js';
+import { sendRuntimeMessage } from './runtimeMessage.js';
 import {
   addPlaybackOwnerToUrl,
   beginPlaybackHandoff,
@@ -92,6 +92,7 @@ function initializeNetflixPlayback() {
   const SELECTOR_EPISODE  = '[data-uia="control-episodes"]';
   const SELECTOR_FWD10    = '[data-uia="control-forward10"]';
   const SELECTOR_SUBTITLE = '[data-uia="control-audio-subtitle"]';
+  const SELECTOR_VIDEO_TITLE = '[data-uia="video-title"]';
 
   const COLOR_DEFAULT = ICON_COLOR_DEFAULT;
   const COLOR_LOOPING = ICON_COLOR_ACTIVE;
@@ -198,11 +199,22 @@ function initializeNetflixPlayback() {
   bootstrapRecordControls();
   startTabVisibilityToggle();
 
+  /**
+   * 再生中の作品名を返す。h4 を持つ動画は作品名とエピソード名が分かれているので h4 を、
+   * 持たない動画は要素全体を使う。録画時のタイトルと記録一覧の絞り込みで規則を共有する。
+   */
+  function readSeriesTitle() {
+    const titleElement = document.querySelector(SELECTOR_VIDEO_TITLE);
+    if (!titleElement) return "";
+    const seriesElement = titleElement.querySelector("h4");
+    return cleanTitleText((seriesElement ?? titleElement).textContent);
+  }
+
   function bootstrapRecordControls() {
     const RECORD_BUTTON_ID = "record-button";
     const RECORD_SELECTORS = {
       videoPlayer: "video",
-      videoTitle: '[data-uia="video-title"]',
+      videoTitle: SELECTOR_VIDEO_TITLE,
       controlsStandard: '[data-uia="controls-standard"]',
       controlVolume: '[data-uia^="control-volume-"]',
       controlForward10: '[data-uia="control-forward10"]'
@@ -262,14 +274,12 @@ function initializeNetflixPlayback() {
               const spans = allTitleName.querySelectorAll("span");
               const episodeTitle = cleanTitleText(spans[1]?.textContent);
 
+              payload.title = readSeriesTitle();
               if (h4Element) {
-                payload.title = cleanTitleText(h4Element.textContent);
                 const episodeNumber = cleanTitleText(spans[0]?.textContent);
                 if (episodeNumber) {
                   payload.epnumber = episodeNumber;
                 }
-              } else {
-                payload.title = cleanTitleText(allTitleName.textContent);
               }
 
               payload.clipName = buildClipName(payload.title, episodeTitle);
@@ -573,52 +583,72 @@ function initializeNetflixPlayback() {
       // API 由来の文字列を扱うため innerHTML は使わない (refs #97)
       const heading = document.createElement("div");
       const headingText = document.createElement("strong");
-      headingText.textContent = `${item.title}（${item.epnumber}）`;
+      // epnum を持たない作品があるため、話数は取れたときだけ添える。
+      headingText.textContent = item.epnumber
+        ? `${item.title}（${item.epnumber}）`
+        : item.title;
       heading.appendChild(headingText);
       const userRow = document.createElement("div");
-      userRow.textContent = `ユーザー: ${item.user}`;
+      userRow.textContent = `ユーザー: ${item.user || "ユーザー不明"}`;
       const rangeRow = document.createElement("div");
       rangeRow.textContent = `範囲: ${formatSeconds(item.startTime)} - ${formatSeconds(item.endTime)}`;
       entry.append(heading, userRow, rangeRow);
       const jumpBtn = document.createElement("button");
       jumpBtn.textContent = "▶ このClipへジャンプ";
       jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
-      jumpBtn.onclick = () => onSelect?.(item.id);
+      jumpBtn.onclick = () => onSelect?.(item);
       entry.appendChild(jumpBtn);
       container.appendChild(entry);
     }
   }
 
   async function fetchDataAndRender(container) {
-    try {
-      const res = await fetch(getApiEndpoint('random10'));
-      const data = await res.json();
-      /** @type {ClipDataProps[]} */
-      const items = data.allReceivedData || [];
+    // 再生中の作品で絞り込む。content から直接 fetch するとページオリジンの CORS で
+    // サイト API に弾かれるため、取得は host permissions を持つ background に投げる。
+    const seriesTitle = readSeriesTitle();
+    const response = await sendRuntimeMessage({
+      type: "FETCH_CLIP_LIST",
+      title: seriesTitle,
+    });
 
-      if (!items.length) {
-        container.textContent = "データがありません。";
-        return;
-      }
-      renderClipList(container, { items, onSelect: (clipId) => selectClip(clipId) });
-    } catch {
-      container.textContent = "データの取得に失敗しました。";
-      console.error("API取得に失敗しました");
+    if (!response?.ok) {
+      container.textContent = clipListErrorMessage(response?.reason);
+      console.error("記録一覧の取得に失敗しました");
+      return;
     }
+
+    /** @type {ClipDataProps[]} */
+    const items = response.items || [];
+    if (!items.length) {
+      container.textContent = seriesTitle
+        ? `「${seriesTitle}」の記録はまだありません。`
+        : "記録がありません。";
+      return;
+    }
+
+    renderClipList(container, { items, onSelect: (clip) => selectClip(clip) });
+  }
+
+  function clipListErrorMessage(reason) {
+    if (reason === "timeout" || reason === "network_error") {
+      return "記録一覧を取得できませんでした。通信環境を確認してください。";
+    }
+    if (reason === "background_unavailable") {
+      return "拡張機能を再読み込みしてください。";
+    }
+    return "記録一覧の取得に失敗しました。";
   }
 
   // ---------------------------------------------------------------------------
   // Clip選択 → Cookie保存 → サービス別ジャンプ
   // ---------------------------------------------------------------------------
-  async function selectClip(clipId) {
+  async function selectClip(clip) {
     try {
-      const res = await fetch(getApiEndpoint(`fetchClip?id=${encodeURIComponent(clipId)}`));
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-      const data = await res.json();
+      // 一覧の応答に再生へ必要な項目が揃っているため、単体取得の往復は行わない。
       const ownerNonce = createPlaybackOwnerNonce();
       await commitSelectedClip({
-        data,
-        requestedClipId: clipId,
+        data: clip,
+        requestedClipId: clip?.id,
         ownerNonce,
         storage: {
           async set(snapshot) {

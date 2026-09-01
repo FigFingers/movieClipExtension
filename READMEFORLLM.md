@@ -90,6 +90,7 @@ host_permissions: `localhost:3000`, `127.0.0.1:3000`, `www.netflix.com`, `www.di
 | `playbackOwnership.js` | `createPlaybackOwnershipManager()`。タブ単位の再生所有権レジストリ |
 | `sync.js` | `enqueuePendingClipInBackground` / `syncPendingQueue` / `openLoginTab` |
 | `comments.js` | `fetchClipComments` / `postClipComment` と応答 shape 検証 |
+| `clips.js` | `fetchClipList`。記録一覧の取得と、サイト応答から拡張が使う項目だけへの正規化 |
 | `tokenRefresh.js` | `checkAndRefreshToken`。期限判定・ローテーション・失敗バックオフ |
 | `authState.js` | トークン保存・連携解除を `runExclusive` 内で実行 |
 | `instanceId.js` | `getOrCreateInstanceId`。instanceId の唯一の発行元 |
@@ -101,16 +102,17 @@ host_permissions: `localhost:3000`, `127.0.0.1:3000`, `www.netflix.com`, `www.di
 
 | ファイル | 行数 | 役割 |
 |---|---:|---|
-| `commentPanel.js` | 1,303 | コメントパネル UI・取得・投稿・下書き保持 |
+| `commentPanel.js` | 1,274 | コメントパネル UI・取得・投稿・下書き保持 |
 | `content_disney.js` | 1,134 | Disney+ の録画 UI・clip / playlist 再生 |
-| `content_netflix.js` | 1,001 | Netflix の録画 UI・一覧・clip / playlist 再生 |
+| `content_netflix.js` | 1,063 | Netflix の録画 UI・一覧・clip / playlist 再生 |
 | `common.js` | 506 | メモサイドバー、`detectService`、seek、自動遷移マーカー |
 | `extensionSync.js` | 195 | instanceId / トークン / 同期の content 側窓口 |
-| `playbackOwnership.js` | 193 | 所有権 client（nonce 生成・claim・update・release） |
+| `playbackOwnership.js` | 173 | 所有権 client（nonce 生成・claim・update・release） |
 | `getClipData.js` | 188 | localhost → 拡張の**再生**ブリッジ |
 | `playbackContext.js` | 146 | タブ固有の再生対象 context |
 | `extension_link.js` | 80 | localhost → 拡張の**認証**ブリッジ |
 | `netflixClipSelection.js` | 42 | 選択クリップの正規化と原子的 commit |
+| `runtimeMessage.js` | 38 | `sendRuntimeMessage`。background へのメッセージ送信の唯一の入口 |
 | `domUpdates.js` | 5 | `setTextContentIfChanged`（同値 DOM 更新の抑制） |
 | `extension_present.js` | 4 | MAIN world の検知フラグ |
 
@@ -195,7 +197,7 @@ Disney+: `UI` IIFE 内部の `myCustomActionLeft()` が 2 段階トグルで同�
 4. `SYNC_PENDING_CLIPS` → `sync.js#syncPendingQueue()` が `POST /api/extension/sync`（Bearer）
 5. network / timeout / 認証 / 一時的な server 失敗では queue に残り、15 分毎の alarm と SW 起動時に再送される。400 validation error で不正な `clientItemId` を特定できた場合だけ、その項目を queue から削除する
 
-**認証付きの同期・token refresh・comments API は background から fetch します。** 一方、Netflix の一覧 UI は認証不要の `random10` / `fetchClip` を content script から直接 fetch しています。content fetch を一律禁止と考えず、既存 endpoint の CORS 契約と認証境界を確認してください。
+**サイト API への fetch はすべて background から行います。** content script からの直接 fetch はページオリジンの CORS でサイト API に弾かれるため、Netflix の記録一覧も `FETCH_CLIP_LIST` で background に取得させます。認証不要の endpoint であっても content から直接叩かないでください。
 
 `syncPendingQueue()` の応答分岐:
 
@@ -339,6 +341,7 @@ playlist の cross-URL 継続では、遷移先で「これは手動離脱では
 | `seek` | `common.js#requestSeek()` | Netflix player を MAIN world で seek |
 | `ENQUEUE_PENDING_CLIP` | `extensionSync.js` | `pendingClips` へ追加 |
 | `SYNC_PENDING_CLIPS` | `extensionSync.js` | `POST /api/extension/sync` |
+| `FETCH_CLIP_LIST` | `content_netflix.js#fetchDataAndRender()` | 記録一覧取得（再生中の作品で絞り込み） |
 | `FETCH_CLIP_COMMENTS` | `commentPanel.js` | コメント取得 |
 | `POST_CLIP_COMMENT` | `commentPanel.js` | コメント投稿 |
 | `SAVE_EXTENSION_AUTH_TOKEN` | `extensionSync.js` | トークン保存 |
@@ -385,8 +388,7 @@ port `extensionInstanceId`（`chrome.runtime.connect`）でも instanceId を返
 
 | メソッド | パス | 呼び出し元 | 認証 |
 |---|---|---|---|
-| GET | `random10` | `src/content/content_netflix.js#fetchDataAndRender()` | なし |
-| GET | `fetchClip?id=...` | `src/content/content_netflix.js#selectClip()` | なし |
+| GET | `v1/clips?title=...&limit=...` | `src/background/clips.js#fetchClipList()` | なし |
 | POST | `extension/sync` | `src/background/sync.js` | Bearer |
 | POST | `extension/token/refresh` | `src/background/tokenRefresh.js` | Bearer |
 | GET | `extension/clips/{clipId}/comments` | `src/background/comments.js` | Bearer + instanceId query |
