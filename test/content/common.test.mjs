@@ -289,6 +289,71 @@ test('reopening on another player restores both original widths', async () => {
   assert.equal(secondPlayer.style.width, '85%');
 });
 
+test('failed saves retain the draft and allow retry, including synchronous throws', async () => {
+  for (const fail of [
+    () => { throw new Error('storage unavailable'); },
+    () => Promise.reject(new Error('storage unavailable')),
+    () => ({ ok: false }),
+  ]) {
+    const { document } = installDom();
+    const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+    const player = document.createElement('video');
+    player.style.width = '80%';
+    let playCount = 0;
+    player.play = () => { playCount += 1; };
+    let saveCount = 0;
+    const sidebar = openMemoSidebar({
+      videoPlayer: player,
+      onSave: (data) => {
+        assert.equal(data.clipName, '入力したメモ');
+        saveCount += 1;
+        return saveCount === 1 ? fail() : { ok: true };
+      },
+    });
+    const controls = sidebarControls(sidebar);
+    controls.nameInput.value = '入力したメモ';
+    controls.saveButton.onclick();
+    controls.saveButton.onclick();
+    assert.equal(controls.saveButton.disabled, true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(saveCount, 1);
+    assert.equal(document.getElementById(MEMO_SIDEBAR_ID), sidebar);
+    assert.equal(controls.nameInput.value, '入力したメモ');
+    assert.equal(controls.nameInput.disabled, false);
+    assert.equal(controls.saveButton.disabled, false);
+    assert.match(sidebar.children[4].textContent, /保存できませんでした/);
+    assert.equal(playCount, 0);
+
+    controls.saveButton.onclick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(saveCount, 2);
+    assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+    assert.equal(player.style.width, '80%');
+    assert.equal(playCount, 1);
+  }
+});
+
+test('a queued save closes once even when sync and playback fail', async () => {
+  const { document } = installDom();
+  const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  player.play = () => Promise.reject(new Error('play blocked'));
+  let saveCount = 0;
+  const sidebar = openMemoSidebar({
+    videoPlayer: player,
+    onSave: () => {
+      saveCount += 1;
+      return { ok: false, queued: true };
+    },
+  });
+  const controls = sidebarControls(sidebar);
+  controls.saveButton.onclick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+  controls.saveButton.onclick();
+  assert.equal(saveCount, 1);
+});
+
 test('Enter submits only from the name input', async () => {
   const { document, window } = installDom();
   const { openMemoSidebar } = await loadCommonModule();
