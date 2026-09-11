@@ -97,12 +97,11 @@
 - どう壊れるか: 検証器が絶対 URL を保証しているため現状は通るはずだが、実機確認が無い。将来相対 URL を許すと Disney+ 側だけ誤 URL になる。
 - 改善方針: 混在 playlist の実機確認を行うか、契約側で「1 playlist 1 service」に絞る。
 
-### 2. 保存失敗でも memo sidebar が閉じる
+### 2. 保存失敗でも memo sidebar が閉じる（解消済み）
 
-- 問題: `src/content/common.js#openMemoSidebar()` の `submit` が `.catch(() => console.error(...)).finally(() => closeSidebar())` になっている。
-- なぜ危険か: 失敗時にユーザーへ何も表示されない。
-- どう壊れるか: enqueue 後の同期失敗なら `pendingClips` に残るが、enqueue 自体の runtime error / background 拒否では永続化されない。どちらでも sidebar が閉じるため、後者は入力を失う。
-- 改善方針: enqueue 成功を確認してから閉じる。enqueue 失敗時は入力を残して理由と再試行手段を UI に出す。同期失敗は queued 状態として表示する。
+- 対応: `src/content/common.js#openMemoSidebar()` は保存の例外・拒否時に入力を保持し、エラーと再試行ボタンを表示する。同期 throw と Promise rejection の両方に対応し、保存中の連打も防ぐ。
+- キューへの永続化が成功した `queued: true` は同期待ちでも保存済みとして閉じ、再保存を促さない。プレイヤーの再生拒否も保存失敗と混同しない。
+- 検証: `test/content/common.test.mjs` の保存失敗・再試行・同期待ち・再生拒否テスト。
 
 ### 3. Disney+ の loop 切り替えが playlist state と噛み合っていない
 
@@ -280,7 +279,7 @@
    対象: `content_disney.js` の `Mode` / `Playlist`
 4. 巨大ファイルを分割する
    対象: `content_netflix.js` → 録画 / 一覧 / clip / playlist / navigation
-5. 保存失敗のユーザー通知を足す
+5. 保存失敗のユーザー通知と入力保持は対応済み（Medium Risk #2）
    対象: `common.js#openMemoSidebar()`
 
 **再生所有権・入力検証・認証まわりは現状で意図した設計になっている。リファクタ対象に入れない。**

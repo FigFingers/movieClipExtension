@@ -90,7 +90,7 @@ host_permissions: `localhost:3000`, `127.0.0.1:3000`, `www.netflix.com`, `www.di
 | `playbackOwnership.js` | `createPlaybackOwnershipManager()`。タブ単位の再生所有権レジストリ |
 | `sync.js` | `enqueuePendingClipInBackground` / `syncPendingQueue` / `openLoginTab` |
 | `comments.js` | `fetchClipComments` / `postClipComment` と応答 shape 検証 |
-| `clips.js` | `fetchClipList`。記録一覧の取得と、サイト応答から拡張が使う項目だけへの正規化 |
+| `clips.js` | `fetchClipList`。記録一覧を取得し、再生と共通の検証器で ID・サービス・URL・時間を検証して必要項目だけへ正規化 |
 | `tokenRefresh.js` | `checkAndRefreshToken`。期限判定・ローテーション・失敗バックオフ |
 | `authState.js` | トークン保存・連携解除を `runExclusive` 内で実行 |
 | `instanceId.js` | `getOrCreateInstanceId`。instanceId の唯一の発行元 |
@@ -341,7 +341,7 @@ playlist の cross-URL 継続では、遷移先で「これは手動離脱では
 | `seek` | `common.js#requestSeek()` | Netflix player を MAIN world で seek |
 | `ENQUEUE_PENDING_CLIP` | `extensionSync.js` | `pendingClips` へ追加 |
 | `SYNC_PENDING_CLIPS` | `extensionSync.js` | `POST /api/extension/sync` |
-| `FETCH_CLIP_LIST` | `content_netflix.js#fetchDataAndRender()` | 記録一覧取得（再生中の作品で絞り込み） |
+| `FETCH_CLIP_LIST` | `clipList.js#loadClipList()`（`content_netflix.js` から呼ぶ） | 記録一覧取得（再生中の作品で絞り込み）。失敗時は再試行を表示し、閉じたパネル・古いリクエストの応答は無視 |
 | `FETCH_CLIP_COMMENTS` | `commentPanel.js` | コメント取得 |
 | `POST_CLIP_COMMENT` | `commentPanel.js` | コメント投稿 |
 | `SAVE_EXTENSION_AUTH_TOKEN` | `extensionSync.js` | トークン保存 |
@@ -547,6 +547,6 @@ Netflix では `inject_script.js`（`document_end`）と `content_netflix.js#inj
 2. どのタブが再生中かは **owner nonce** で決まる。通常は URL query → sessionStorage、互換経路では source / opener tab に一致する pending から background が nonce を解決して sessionStorage に保持する
 3. コメントの投稿先は **タブ固有 playback context** で決まり、global state からは決まらない
 4. サイトからの入力はすべて信頼しない。再生 handoff は content と background が**同じ検証器**で二重に弾き、認証入力は background が最終検証する
-5. 認証付き API fetch は **background**。Netflix 一覧の認証不要 GET 2 本は content から直接呼ぶ
+5. サイト API fetch は認証の有無によらず **background**。Netflix 一覧も `FETCH_CLIP_LIST` メッセージで取得する
 6. Netflix の非公開 player API を使う seek は background の MAIN-world bridge が担当する。content は通常の `<video>` 要素の取得・停止・監視を行う
 7. 自動遷移マーカーは nonce + route に束縛された one-shot で、タブをまたがない
