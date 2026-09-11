@@ -13,7 +13,7 @@
 - `docs/localhost-playback-bridge-contract-v1.md` — サイト⇄拡張の再生ハンドオフ入力契約の**正典**（リポジトリ同梱対象）
 - `CODE_ISSUES_FOR_LLM.md` — 現行コードで確認済みの既知問題・危険箇所（リポジトリ同梱対象。記載の検証 commit を確認する）
 - `src/shared/playbackBridgeValidation.js` — 上記契約の実行時実装
-- `test/playbackBridgeValidation.test.js` / `test/getClipData.test.js` — 契約の主要な自動テスト（後者は全経路の成功系を網羅していない）
+- `test/shared/playbackBridgeValidation.test.js` / `test/content/getClipData.test.js` — 契約の主要な自動テスト（後者は全経路の成功系を網羅していない）
 
 ## 前提: bundle entry の変更にはビルドが必要
 

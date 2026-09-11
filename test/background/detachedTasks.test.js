@@ -5,7 +5,7 @@ import {
   PLAYBACK_CLEANUP_RETRY_DELAY_MINUTES,
   runDetachedTask,
   runPlaybackCleanupTask,
-} from '../src/background/detachedTasks.js';
+} from '../../src/background/detachedTasks.js';
 
 test('a rejected detached task is reported and resolves as a fixed failure', async () => {
   const logs = [];

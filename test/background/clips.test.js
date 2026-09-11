@@ -7,7 +7,7 @@ import {
   fetchClipList,
   getClipListResponseReason,
   normalizeClipListItem,
-} from '../src/background/clips.js';
+} from '../../src/background/clips.js';
 
 function clipRowFixture(overrides = {}) {
   return {

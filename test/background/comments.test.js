@@ -10,9 +10,9 @@ import {
   postClipComment,
   validateFetchClipCommentsInput,
   validatePostClipCommentInput,
-} from '../src/background/comments.js';
-import { saveExtensionAuthTokenInBackground } from '../src/background/authState.js';
-import { runExclusive } from '../src/background/sync.js';
+} from '../../src/background/comments.js';
+import { saveExtensionAuthTokenInBackground } from '../../src/background/authState.js';
+import { runExclusive } from '../../src/background/sync.js';
 
 const INSTANCE_ID = '11111111-1111-4111-8111-111111111111';
 

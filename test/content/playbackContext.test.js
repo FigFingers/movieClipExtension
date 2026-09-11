@@ -7,8 +7,8 @@ import {
   ensurePlaybackContext,
   readPlaybackContext,
   setPlaybackContext,
-} from '../src/content/playbackContext.js';
-import { resolveCurrentClipId } from '../src/content/commentPanel.js';
+} from '../../src/content/playbackContext.js';
+import { resolveCurrentClipId } from '../../src/content/commentPanel.js';
 
 class MemorySessionStorage {
   constructor() {

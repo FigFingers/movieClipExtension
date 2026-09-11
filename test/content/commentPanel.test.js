@@ -9,7 +9,7 @@ import {
   shouldClearSubmittedDraft,
   shouldClosePanelForKeyEvent,
   toggleCommentPanel,
-} from '../src/content/commentPanel.js';
+} from '../../src/content/commentPanel.js';
 
 class FakeEventTarget {
   constructor() {

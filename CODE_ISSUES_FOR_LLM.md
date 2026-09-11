@@ -208,7 +208,7 @@
 ### サイトとの契約は明文化されたが、拡張側にしか無い部分が残る
 
 - 対応済み: 再生ハンドオフは `docs/localhost-playback-bridge-contract-v1.md` に、認証連携は PR #115 で明確化。
-- 対応済み: 記録一覧はサイトの `GET /api/v1/clips` へ移行し、拡張が依存する項目は `background/clips.js#normalizeClipListItem()` と `test/backgroundClips.test.js` に固定した。
+- 対応済み: 記録一覧はサイトの `GET /api/v1/clips` へ移行し、拡張が依存する項目は `background/clips.js#normalizeClipListItem()` と `test/background/clips.test.js` に固定した。
 - 未対応: サイト側は Prisma の `include: { user: true }` をそのまま返すため、応答には拡張が使わない user の全カラムが含まれる（サイト issue #55）。正規化で捨てているが、サイト側が絞れば正規化も追随させる。
 
 ## Fragile Areas

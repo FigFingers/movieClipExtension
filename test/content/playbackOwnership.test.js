@@ -6,7 +6,7 @@ import {
   claimPlaybackOwnership,
   createPlaybackOwnerNonce,
   getTabPlaybackOwnerNonce,
-} from '../src/content/playbackOwnership.js';
+} from '../../src/content/playbackOwnership.js';
 
 class MemorySessionStorage {
   constructor(initial = {}) {

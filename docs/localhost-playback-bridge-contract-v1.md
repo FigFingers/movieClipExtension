@@ -283,9 +283,9 @@ Background は Content Script の検証結果を信用せず、受け取った
 - 共通検証器: [playbackBridgeValidation.js](../src/shared/playbackBridgeValidation.js)
 - ローカルサイトとの橋渡し: [getClipData.js](../src/content/getClipData.js)
 - Background の再検証: [playbackOwnership.js](../src/background/playbackOwnership.js)
-- 入力検証テスト: [playbackBridgeValidation.test.js](../test/playbackBridgeValidation.test.js)
-- 所有権テスト: [playbackOwnership.test.js](../test/playbackOwnership.test.js)
-- 経路テスト: [getClipData.test.js](../test/getClipData.test.js)
+- 入力検証テスト: [playbackBridgeValidation.test.js](../test/shared/playbackBridgeValidation.test.js)
+- 所有権テスト: [playbackOwnership.test.js](../test/background/playbackOwnership.test.js)
+- 経路テスト: [getClipData.test.js](../test/content/getClipData.test.js)
 
 ## 9. 互換性と変更ルール
 
