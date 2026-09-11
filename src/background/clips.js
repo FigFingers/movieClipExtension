@@ -1,5 +1,5 @@
 import { getApiEndpoint } from './../api.js';
-import { STRING_LIMITS } from './../shared/playbackBridgeValidation.js';
+import { normalizeClipInput, STRING_LIMITS } from './../shared/playbackBridgeValidation.js';
 import { fetchJsonWithTimeout } from './request.js';
 
 export const CLIP_LIST_DEFAULT_LIMIT = 10;
@@ -11,7 +11,10 @@ export const CLIP_LIST_MAX_TITLE_LENGTH = 200;
 function clampString(value, limit) {
   if (typeof value !== 'string') return '';
   const trimmed = value.trim();
-  return trimmed.length > limit ? trimmed.slice(0, limit) : trimmed;
+  if (trimmed.length <= limit) return trimmed;
+  // UTF-16 のサロゲートペアを途中で切ると、後続の Cookie encode が失敗する。
+  const end = /[\uD800-\uDBFF]/.test(trimmed[limit - 1]) ? limit - 1 : limit;
+  return trimmed.slice(0, end);
 }
 
 function normalizeLimit(limit) {
@@ -39,10 +42,6 @@ export function getClipListResponseReason(status) {
   return 'request_failed';
 }
 
-function isPositiveSafeInteger(value) {
-  return Number.isSafeInteger(value) && value > 0;
-}
-
 function msToSeconds(value) {
   if (!Number.isSafeInteger(value) || value < 0) return null;
   return value / 1000;
@@ -60,9 +59,6 @@ function msToSeconds(value) {
 export function normalizeClipListItem(raw) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
 
-  const id = Number(raw.id);
-  if (!isPositiveSafeInteger(id)) return null;
-
   const startTime = msToSeconds(raw.startMs);
   const endTime = msToSeconds(raw.endMs);
   if (startTime === null || endTime === null || endTime <= startTime) return null;
@@ -71,9 +67,8 @@ export function normalizeClipListItem(raw) {
   const service = typeof raw.vod?.code === 'string' ? raw.vod.code : '';
   if (!url || !service) return null;
 
-  return {
-    id,
-    clipId: id,
+  const normalized = normalizeClipInput({
+    clipId: raw.id,
     title: clampString(raw.title, STRING_LIMITS.title),
     epnumber: clampString(raw.epnum, STRING_LIMITS.epnumber),
     user: clampString(raw.user?.name, STRING_LIMITS.user),
@@ -81,6 +76,14 @@ export function normalizeClipListItem(raw) {
     url,
     startTime,
     endTime,
+  });
+  if (!normalized.ok) return null;
+  return {
+    title: '',
+    epnumber: '',
+    user: '',
+    ...normalized.value,
+    id: normalized.value.clipId,
   };
 }
 

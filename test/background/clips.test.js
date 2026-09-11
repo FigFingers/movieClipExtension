@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { normalizeSelectedClip } from '../../src/content/netflixClipSelection.js';
 
 import {
   CLIP_LIST_DEFAULT_LIMIT,
@@ -121,8 +122,8 @@ test('clip 行を拡張が使う項目だけに組み直す', () => {
     title: 'ブレイキング・バッド',
     epnumber: 'エピソード1',
     user: 'alice',
-    service: 'NETFLIX',
-    url: '/watch/70143836',
+    service: 'netflix',
+    url: 'https://www.netflix.com/watch/70143836',
     startTime: 61,
     endTime: 95.5,
   });
@@ -166,6 +167,15 @@ test('再生に必要な項目を欠く行は捨てる', () => {
     clipRowFixture({ startMs: -1 }),
     clipRowFixture({ url: '' }),
     clipRowFixture({ vod: null }),
+    clipRowFixture({ id: true }),
+    clipRowFixture({ id: [12] }),
+    clipRowFixture({ id: '1e2' }),
+    clipRowFixture({ vod: { code: 'YOUTUBE' } }),
+    clipRowFixture({ url: 'https://example.com/watch/1' }),
+    clipRowFixture({ url: 'javascript:alert(1)' }),
+    clipRowFixture({ url: 'http://www.netflix.com/watch/1' }),
+    clipRowFixture({ url: 'https://www.netflix.com:443/watch/1' }),
+    clipRowFixture({ url: '/' + 'x'.repeat(4096) }),
     null,
     'clip',
     [],
@@ -174,6 +184,31 @@ test('再生に必要な項目を欠く行は捨てる', () => {
   for (const row of broken) {
     assert.equal(normalizeClipListItem(row), null);
   }
+});
+
+test('一覧の有効な行はそのまま再生へ渡せる', () => {
+  for (const overrides of [
+    { id: '12' },
+    { vod: { code: 'DISNEY_PLUS' }, url: '/video/abc' },
+  ]) {
+    const item = normalizeClipListItem(clipRowFixture(overrides));
+    assert.ok(item);
+    const selected = normalizeSelectedClip(item);
+    assert.equal(selected.clipId, item.id);
+    assert.equal(selected.url, item.url);
+    assert.equal(selected.service, item.service);
+  }
+});
+
+test('文字列の切り詰めが絵文字を壊さず Cookie に保存できる', () => {
+  const item = normalizeClipListItem(clipRowFixture({
+    title: 'あ'.repeat(499) + '😀末尾',
+    user: { name: 'い'.repeat(199) + '😀末尾' },
+  }));
+  assert.equal(item.title, 'あ'.repeat(499));
+  assert.equal(item.user, 'い'.repeat(199));
+  assert.doesNotThrow(() => encodeURIComponent(item.title));
+  assert.doesNotThrow(() => encodeURIComponent(item.user));
 });
 
 test('200 なら正規化した一覧を返し、壊れた行だけ落とす', async () => {
