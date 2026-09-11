@@ -36,7 +36,7 @@ import {
   setPlaybackContext
 } from './playbackContext.js';
 import { commitSelectedClip } from './netflixClipSelection.js';
-import { sendRuntimeMessage } from './runtimeMessage.js';
+import { loadClipList } from './clipList.js';
 import {
   addPlaybackOwnerToUrl,
   beginPlaybackHandoff,
@@ -552,6 +552,8 @@ function initializeNetflixPlayback() {
     const title = document.createElement("strong");
     title.textContent = "記録一覧";
     const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "記録一覧を閉じる");
     closeBtn.textContent = "×";
     closeBtn.style.cssText = "background:red;color:#fff;border:none;cursor:pointer;font-size:14px;";
     closeBtn.onclick = toggleSidebar;
@@ -564,7 +566,10 @@ function initializeNetflixPlayback() {
     sb.appendChild(listContainer);
 
     document.body.appendChild(sb);
-    fetchDataAndRender(listContainer);
+    void loadClipList(listContainer, {
+      title: readSeriesTitle(),
+      onLoaded: (items) => renderClipList(listContainer, { items, onSelect: selectClip }),
+    });
   }
 
   function closeSidebar() {
@@ -600,43 +605,6 @@ function initializeNetflixPlayback() {
       entry.appendChild(jumpBtn);
       container.appendChild(entry);
     }
-  }
-
-  async function fetchDataAndRender(container) {
-    // 再生中の作品で絞り込む。content から直接 fetch するとページオリジンの CORS で
-    // サイト API に弾かれるため、取得は host permissions を持つ background に投げる。
-    const seriesTitle = readSeriesTitle();
-    const response = await sendRuntimeMessage({
-      type: "FETCH_CLIP_LIST",
-      title: seriesTitle,
-    });
-
-    if (!response?.ok) {
-      container.textContent = clipListErrorMessage(response?.reason);
-      console.error("記録一覧の取得に失敗しました");
-      return;
-    }
-
-    /** @type {ClipDataProps[]} */
-    const items = response.items || [];
-    if (!items.length) {
-      container.textContent = seriesTitle
-        ? `「${seriesTitle}」の記録はまだありません。`
-        : "記録がありません。";
-      return;
-    }
-
-    renderClipList(container, { items, onSelect: (clip) => selectClip(clip) });
-  }
-
-  function clipListErrorMessage(reason) {
-    if (reason === "timeout" || reason === "network_error") {
-      return "記録一覧を取得できませんでした。通信環境を確認してください。";
-    }
-    if (reason === "background_unavailable") {
-      return "拡張機能を再読み込みしてください。";
-    }
-    return "記録一覧の取得に失敗しました。";
   }
 
   // ---------------------------------------------------------------------------
