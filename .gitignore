@@ -1,1 +1,26 @@
+# 依存パッケージ
+/node_modules
+
+# ビルド成果物（manifest.json が参照する bundle の出力先）
+/dist
+
+# ローカル設定・秘密情報
 config.js
+.env*
+*.pem
+
+# ログ
+npm-debug.log*
+
+# OS が作るファイル
+.DS_Store
+Thumbs.db
+
+# ローカル専用の調査メモ（再生ハンドオフ契約だけ追跡する）
+/docs/*
+!/docs/localhost-playback-bridge-contract-v1.md
+
+# ローカルのエージェント設定
+/.claude
+/.agents
+CLAUDE.md
