@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { fetchJsonWithTimeout } from '../src/background/request.js';
+import { fetchJsonWithTimeout } from '../../src/background/request.js';
 
 async function withManualTimeout(fetchImpl, task) {
   const originalFetch = globalThis.fetch;

@@ -10,7 +10,7 @@ import {
   normalizePlaylistInput,
   normalizePlaylistJson,
   parsePlaybackCookies,
-} from '../src/shared/playbackBridgeValidation.js';
+} from '../../src/shared/playbackBridgeValidation.js';
 
 function clipInput(overrides = {}) {
   return {

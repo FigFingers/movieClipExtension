@@ -56,7 +56,7 @@ test('history hook patches once and reports push, replace, and popstate URLs', a
   });
 
   try {
-    await import(`../src/util/history_change.js?first=${Date.now()}`);
+    await import(`../../src/util/history_change.js?first=${Date.now()}`);
     const patchedPushState = history.pushState;
     const patchedReplaceState = history.replaceState;
 
@@ -91,7 +91,7 @@ test('history hook patches once and reports push, replace, and popstate URLs', a
       ]
     );
 
-    await import(`../src/util/history_change.js?second=${Date.now()}`);
+    await import(`../../src/util/history_change.js?second=${Date.now()}`);
     assert.equal(history.pushState, patchedPushState);
     assert.equal(history.replaceState, patchedReplaceState);
   } finally {

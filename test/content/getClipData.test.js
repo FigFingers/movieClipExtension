@@ -42,7 +42,7 @@ globalThis.setTimeout = (callback, delay) => {
   return scheduledTasks.length;
 };
 
-await import('../src/content/getClipData.js');
+await import('../../src/content/getClipData.js');
 
 function resetObservations() {
   postedMessages.length = 0;

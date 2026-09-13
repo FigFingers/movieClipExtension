@@ -4,20 +4,20 @@ import { test } from 'node:test';
 import {
   saveExtensionAuthTokenInBackground,
   unlinkExtensionInBackground,
-} from '../src/background/authState.js';
+} from '../../src/background/authState.js';
 import {
   enqueuePendingClipInBackground,
   openLoginTab,
   runExclusive,
   syncPendingQueue,
-} from '../src/background/sync.js';
-import { checkAndRefreshToken } from '../src/background/tokenRefresh.js';
-import { getOrCreateInstanceId } from '../src/background/instanceId.js';
+} from '../../src/background/sync.js';
+import { checkAndRefreshToken } from '../../src/background/tokenRefresh.js';
+import { getOrCreateInstanceId } from '../../src/background/instanceId.js';
 import {
   enqueueClip,
   getExtensionConnectionState,
   saveExtensionAuthToken,
-} from '../src/content/extensionSync.js';
+} from '../../src/content/extensionSync.js';
 
 const INSTANCE_ID = '11111111-1111-4111-8111-111111111111';
 const OTHER_INSTANCE_ID = '22222222-2222-4222-8222-222222222222';
