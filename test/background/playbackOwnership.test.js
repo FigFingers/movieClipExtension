@@ -6,7 +6,7 @@ import {
   PLAYBACK_OWNER_STORAGE_KEY,
   PLAYBACK_REGISTRY_STORAGE_KEY,
   createPlaybackOwnershipManager,
-} from '../src/background/playbackOwnership.js';
+} from '../../src/background/playbackOwnership.js';
 
 class MemoryStorageArea {
   constructor(initial = {}) {

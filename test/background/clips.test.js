@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { normalizeSelectedClip } from '../src/content/netflixClipSelection.js';
+import { normalizeSelectedClip } from '../../src/content/netflixClipSelection.js';
 
 import {
   CLIP_LIST_DEFAULT_LIMIT,
@@ -8,7 +8,7 @@ import {
   fetchClipList,
   getClipListResponseReason,
   normalizeClipListItem,
-} from '../src/background/clips.js';
+} from '../../src/background/clips.js';
 
 function clipRowFixture(overrides = {}) {
   return {
