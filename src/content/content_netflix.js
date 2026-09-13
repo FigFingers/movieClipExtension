@@ -9,6 +9,8 @@ import {
   clearAutoNavigation,
   closeMemoSidebar,
   createElementWait,
+  buildClipName,
+  cleanTitleText,
   detectService,
   formatSeconds,
   handleClipTransition,
@@ -76,6 +78,8 @@ function initializeNetflixPlayback() {
   /** @type {ClipDataProps | null} */
   let clipData = null;
   const EPSILON = 0.05;
+  // シークが収束しないまま無限に回らないための締切
+  const SEEK_RETRY_TIMEOUT_MS = 10000;
   let countdownIntervalId = null;
 
   const BUTTON_ID = "nf-loop-toggle-btn";
@@ -92,7 +96,6 @@ function initializeNetflixPlayback() {
   const COLOR_DEFAULT = ICON_COLOR_DEFAULT;
   const COLOR_LOOPING = ICON_COLOR_ACTIVE;
   let isLooping = false;
-  let togglekey = false;
   let uiWarmerInterval = null;
   let activePlaybackOwnerNonce = null;
   let playbackLocation = null;
@@ -159,6 +162,7 @@ function initializeNetflixPlayback() {
     clipData = null;
     activePlaylistQueue = null;
     activePlaylistOrder = null;
+    syncPlayNextButtonState();
   }
 
   function stopPlaybackRuntime() {
@@ -254,15 +258,21 @@ function initializeNetflixPlayback() {
 
             if (allTitleName) {
               const h4Element = allTitleName.querySelector("h4");
+              // span[0] = 話数、span[1] = エピソードタイトル。片方しか無い動画もある
+              const spans = allTitleName.querySelectorAll("span");
+              const episodeTitle = cleanTitleText(spans[1]?.textContent);
+
               if (h4Element) {
-                payload.title = h4Element.textContent;
-                const episodeNumberElement = allTitleName.querySelector("span:nth-of-type(1)");
-                if (episodeNumberElement) {
-                  payload.epnumber = episodeNumberElement.textContent;
+                payload.title = cleanTitleText(h4Element.textContent);
+                const episodeNumber = cleanTitleText(spans[0]?.textContent);
+                if (episodeNumber) {
+                  payload.epnumber = episodeNumber;
                 }
               } else {
-                payload.title = allTitleName.textContent;
+                payload.title = cleanTitleText(allTitleName.textContent);
               }
+
+              payload.clipName = buildClipName(payload.title, episodeTitle);
             } else {
               throw new Error("タイトル要素が見つかりません。");
             }
@@ -364,10 +374,24 @@ function initializeNetflixPlayback() {
     btn.appendChild(svgIcon);
     btn.style.cursor = "pointer";
     btn.addEventListener("click", () => {
-      togglekey = !togglekey;
-      svgIcon.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
+      if (!isPlaylistModeActive()) return;
+      void playlistNextClip(activePlaylistQueue, activePlaylistOrder ?? 0);
     });
     return { btn, svg: svgIcon };
+  }
+
+  function isPlaylistModeActive() {
+    return Array.isArray(activePlaylistQueue) && activePlaylistQueue.length > 0;
+  }
+
+  // プレイリスト再生中しか進める先が無いため、それ以外では押せなくする
+  function syncPlayNextButtonState() {
+    const btn = document.getElementById(NEXT_BUTTON_ID);
+    if (!btn) return;
+    const enabled = isPlaylistModeActive();
+    btn.disabled = !enabled;
+    btn.style.cursor = enabled ? "pointer" : "not-allowed";
+    btn.style.opacity = enabled ? "1" : "0.4";
   }
 
   function createCommentButton() {
@@ -444,7 +468,7 @@ function initializeNetflixPlayback() {
       markExtUi(commentButton);
 
       loopSvg.style.color = isLooping ? COLOR_LOOPING : COLOR_DEFAULT;
-      playSvg.style.color = togglekey ? COLOR_LOOPING : COLOR_DEFAULT;
+      playSvg.style.color = COLOR_DEFAULT;
       commentSvg.style.color = isCommentPanelOpen() ? COLOR_LOOPING : COLOR_DEFAULT;
 
       const wrapper = document.createElement("div");
@@ -463,6 +487,7 @@ function initializeNetflixPlayback() {
       wrapper.appendChild(commentButton);
 
       anchorBtn.parentNode.after(wrapper);
+      syncPlayNextButtonState();
 
       const spacer = document.createElement("div");
       spacer.style.minWidth = "3rem";
@@ -722,6 +747,7 @@ function initializeNetflixPlayback() {
       }
       activePlaylistQueue = playQueue;
       activePlaylistOrder = currentClip.order;
+      syncPlayNextButtonState();
       clipData = {
         startTime: Number(currentClip.startTime ?? currentClip.starttime),
         endTime:   Number(currentClip.endTime   ?? currentClip.endtime),
@@ -758,6 +784,7 @@ function initializeNetflixPlayback() {
     if (!transitioned) return;
     activePlaylistQueue = sortedQueue;
     activePlaylistOrder = next.order;
+    syncPlayNextButtonState();
 
     clipData = {
       startTime: Number(next.startTime ?? next.starttime),
@@ -774,6 +801,8 @@ function initializeNetflixPlayback() {
         startUIWarmer();
         const targetTime = Math.floor(next.startTime);
 
+        const seekDeadline = Date.now() + SEEK_RETRY_TIMEOUT_MS;
+
         for (;;) {
           if (transitionGeneration !== playbackGeneration) return;
           try {
@@ -789,6 +818,15 @@ function initializeNetflixPlayback() {
           if (Math.abs(currentSec - targetTime) <= 1) {
             stopUIWarmer();
             break;
+          }
+
+          if (Date.now() >= seekDeadline) {
+            stopUIWarmer();
+            console.warn(
+              "[Playlist] シークが収束しないため中断:",
+              { targetTime, currentSec }
+            );
+            return;
           }
         }
 

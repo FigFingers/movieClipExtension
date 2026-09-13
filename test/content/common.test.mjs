@@ -512,3 +512,30 @@ test('formatSeconds floors fractions and clamps invalid input to zero', async ()
   assert.equal(formatSeconds(Number.POSITIVE_INFINITY), '0:00');
   assert.equal(formatSeconds(), '0:00');
 });
+
+test('cleanTitleText strips zero-width characters and trims', async () => {
+  installDom();
+  const { cleanTitleText } = await loadCommonModule();
+
+  // Netflix の話数 span は文字間に U+FEFF が挿入される
+  assert.equal(cleanTitleText('\uFEFFエ\uFEFFピ\uFEFFソ\uFEFFー\uFEFFド16: '), 'エピソード16:');
+  assert.equal(cleanTitleText('物怪\u200Bと武士'), '物怪と武士');
+  assert.equal(cleanTitleText('  刃牙道  '), '刃牙道');
+  assert.equal(cleanTitleText('\uFEFF\u200B'), '');
+  assert.equal(cleanTitleText(undefined), '');
+  assert.equal(cleanTitleText(null), '');
+  assert.equal(cleanTitleText(42), '');
+});
+
+test('buildClipName joins the series and episode titles', async () => {
+  installDom();
+  const { buildClipName } = await loadCommonModule();
+
+  assert.equal(buildClipName('刃牙道', '物怪と武士'), '刃牙道｜物怪と武士');
+  assert.equal(buildClipName('\uFEFF刃牙道', ' 物怪と武士 '), '刃牙道｜物怪と武士');
+  // span が 1 つしか無い動画では作品名だけを返す
+  assert.equal(buildClipName('刃牙道', ''), '刃牙道');
+  assert.equal(buildClipName('刃牙道', undefined), '刃牙道');
+  assert.equal(buildClipName('', '物怪と武士'), '物怪と武士');
+  assert.equal(buildClipName(undefined, undefined), '');
+});
