@@ -2,8 +2,23 @@ import {
   fetchClipComments,
   postClipComment,
 } from './comments.js';
-import { openLoginTab, syncPendingQueue } from './sync.js';
+import { createPlaybackOwnershipManager } from './playbackOwnership.js';
+import {
+  saveExtensionAuthTokenInBackground,
+  unlinkExtensionInBackground,
+} from './authState.js';
+import {
+  PLAYBACK_CLEANUP_RETRY_DELAY_MINUTES,
+  runDetachedTask,
+  runPlaybackCleanupTask,
+} from './detachedTasks.js';
+import {
+  enqueuePendingClipInBackground,
+  openLoginTab,
+  syncPendingQueue,
+} from './sync.js';
 import { checkAndRefreshToken } from './tokenRefresh.js';
+import { getOrCreateInstanceId } from './instanceId.js';
 
 const DEMO_BASE_URL = 'http://localhost:3000/';
 const WELCOME_VERSION_KEY = 'lastSeenWelcomeVersion';
@@ -13,8 +28,14 @@ const DEMO_COOLDOWN_MS = 5 * 60 * 1000;
 
 const TOKEN_REFRESH_ALARM = 'extension-token-refresh';
 const SYNC_RETRY_ALARM = 'extension-sync-retry';
+const PLAYBACK_HANDOFF_ALARM_PREFIX = 'playback-handoff-cleanup:';
 const TOKEN_REFRESH_PERIOD_MINUTES = 6 * 60;
 const SYNC_RETRY_PERIOD_MINUTES = 15;
+
+const playbackOwnership = createPlaybackOwnershipManager({
+  sessionStorage: chrome.storage.session,
+  localStorage: chrome.storage.local,
+});
 
 function getMajor(v) {
   return parseInt(String(v).split('.')[0] || '0', 10);
@@ -31,12 +52,6 @@ function createTab(url) {
     });
   });
 }
-
-chrome.runtime.onMessage.addListener((message) => {
-  if (message.type === 'HISTORY_CHANGE') {
-    console.log('URLが変更されました:', message.data.url);
-  }
-});
 
 // クリップ同期は background で fetch する(content の fetch はページオリジンの CORS で
 // サイト API に弾かれるため)。ログインタブ起動も sync 側(openLoginTab)が直接行う。
@@ -68,6 +83,14 @@ function respondToAsyncRequest(promise, sendResponse, reason = 'request_failed')
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'ENQUEUE_PENDING_CLIP') {
+    return respondToAsyncRequest(
+      enqueuePendingClipInBackground(message.clip),
+      sendResponse,
+      'enqueue_failed'
+    );
+  }
+
   if (message?.type === 'FETCH_CLIP_COMMENTS') {
     return respondToAsyncRequest(fetchClipComments({
       clipId: message.clipId,
@@ -83,40 +106,191 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }), sendResponse);
   }
 
+  if (message?.type === 'SAVE_EXTENSION_AUTH_TOKEN') {
+    return respondToAsyncRequest(saveExtensionAuthTokenInBackground({
+      extensionInstanceId: message.extensionInstanceId,
+      extensionAuthToken: message.extensionAuthToken,
+      expiresAt: message.expiresAt,
+    }), sendResponse, 'save_auth_failed');
+  }
+
+  if (message?.type === 'UNLINK_EXTENSION') {
+    return respondToAsyncRequest(unlinkExtensionInBackground({
+      extensionInstanceId: message.extensionInstanceId,
+    }), sendResponse, 'unlink_failed');
+  }
+
   if (message?.type === 'OPEN_LOGIN_TAB') {
     return respondToAsyncRequest(
-      openLoginTab({ force: true }),
+      openLoginTab(),
       sendResponse,
       'open_login_failed'
     );
   }
 });
 
-function scheduleAlarms() {
-  chrome.alarms.create(TOKEN_REFRESH_ALARM, { periodInMinutes: TOKEN_REFRESH_PERIOD_MINUTES });
-  chrome.alarms.create(SYNC_RETRY_ALARM, { periodInMinutes: SYNC_RETRY_PERIOD_MINUTES });
+async function scheduleAlarms() {
+  await Promise.all([
+    chrome.alarms.create(TOKEN_REFRESH_ALARM, {
+      periodInMinutes: TOKEN_REFRESH_PERIOD_MINUTES,
+    }),
+    chrome.alarms.create(SYNC_RETRY_ALARM, {
+      periodInMinutes: SYNC_RETRY_PERIOD_MINUTES,
+    }),
+  ]);
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith(PLAYBACK_HANDOFF_ALARM_PREFIX)) {
+    void runPlaybackCleanupTask({
+      cleanup: () => playbackOwnership.cleanupExpired(),
+      alarmName: alarm.name,
+      scheduleAlarm: (name, options) => chrome.alarms.create(name, options),
+    });
+    return;
+  }
   if (alarm.name === TOKEN_REFRESH_ALARM) {
-    void checkAndRefreshToken();
+    void runDetachedTask(() => checkAndRefreshToken(), {
+      label: 'token refresh alarm',
+    });
     return;
   }
   if (alarm.name === SYNC_RETRY_ALARM) {
     // キューが空なら storage を1回読むだけで即終了するので低コスト。
-    void syncPendingQueue();
+    void runDetachedTask(() => syncPendingQueue(), {
+      label: 'sync retry alarm',
+    });
   }
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  scheduleAlarms();
+  void runDetachedTask(() => scheduleAlarms(), {
+    label: 'startup alarm scheduling',
+  });
+  void runDetachedTask(() => playbackOwnership.reset(), {
+    label: 'startup playback reset',
+  });
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'BEGIN_PLAYBACK_HANDOFF') {
+    const handoff = playbackOwnership.beginHandoff({
+      nonce: message.nonce,
+      sourceTabId: sender?.tab?.id,
+      context: message.context,
+      snapshot: message.snapshot,
+    }).then((result) => {
+      if (result?.ok) {
+        const alarmName = `${PLAYBACK_HANDOFF_ALARM_PREFIX}${message.nonce}`;
+        void runDetachedTask(
+          () => chrome.alarms.create(alarmName, { delayInMinutes: 0.5 }),
+          {
+            label: 'playback cleanup alarm scheduling',
+            onError: () => chrome.alarms.create(alarmName, {
+              delayInMinutes: PLAYBACK_CLEANUP_RETRY_DELAY_MINUTES,
+            }),
+          }
+        );
+      }
+      return result;
+    });
+    return respondToAsyncRequest(
+      handoff,
+      sendResponse,
+      'playback_handoff_failed'
+    );
+  }
+
+  if (message?.type === 'CLAIM_PLAYBACK_OWNERSHIP') {
+    return respondToAsyncRequest(
+      playbackOwnership.claim({
+        tabId: sender?.tab?.id,
+        openerTabId: sender?.tab?.openerTabId,
+        nonce: message.nonce,
+        route: message.route,
+      }),
+      sendResponse,
+      'playback_claim_failed'
+    );
+  }
+
+  if (message?.type === 'UPDATE_PLAYBACK_OWNERSHIP') {
+    return respondToAsyncRequest(
+      playbackOwnership.update({
+        tabId: sender?.tab?.id,
+        nonce: message.nonce,
+        context: message.context,
+        patch: message.patch,
+        route: message.route,
+      }),
+      sendResponse,
+      'playback_update_failed'
+    );
+  }
+
+  if (message?.type === 'PREPARE_PLAYBACK_NAVIGATION') {
+    return respondToAsyncRequest(
+      playbackOwnership.prepareNavigation({
+        tabId: sender?.tab?.id,
+        nonce: message.nonce,
+        nextUrl: message.nextUrl,
+      }),
+      sendResponse,
+      'playback_navigation_failed'
+    );
+  }
+
+  if (message?.type === 'RELEASE_PLAYBACK_OWNERSHIP') {
+    return respondToAsyncRequest(
+      playbackOwnership.release({
+        tabId: sender?.tab?.id,
+        nonce: message.nonce,
+      }),
+      sendResponse,
+      'playback_release_failed'
+    );
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void runDetachedTask(() => playbackOwnership.removeTab(tabId), {
+    label: 'playback tab removal',
+  });
+});
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (Number.isInteger(tab?.openerTabId)) {
+    void runDetachedTask(() => playbackOwnership.bindTarget({
+      tabId: tab.id,
+      openerTabId: tab.openerTabId,
+    }), {
+      label: 'playback target binding',
+    });
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    void runDetachedTask(
+      () => playbackOwnership.handleTabNavigation({
+        tabId,
+        url: changeInfo.url,
+      }),
+      { label: 'playback tab navigation' }
+    );
+  }
 });
 
 // SW が起きたタイミングで期限チェックと積み残しの再送を行う(どちらも未連携・空キュー
 // なら即終了)。refresh を先に済ませ、旧トークンでの sync 401 を避ける。
-checkAndRefreshToken().finally(() => {
-  void syncPendingQueue();
-});
+void runDetachedTask(async () => {
+  await runDetachedTask(() => checkAndRefreshToken(), {
+    label: 'service worker token refresh',
+  });
+  await runDetachedTask(() => syncPendingQueue(), {
+    label: 'service worker pending sync',
+  });
+}, { label: 'service worker initialization' });
 
 async function handleInstalledDemo(details) {
   try {
@@ -167,52 +341,13 @@ async function handleInstalledDemo(details) {
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
-  scheduleAlarms();
-  void handleInstalledDemo(details);
-});
-
-function readOrCreateInstanceId() {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get('extensionInstanceId', (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-
-      if (result.extensionInstanceId) {
-        resolve(result.extensionInstanceId);
-        return;
-      }
-
-      // 初回リンク時は生成した ID の永続化を待ってから解決する。
-      // 先に応答すると、ページがトークンを往復させた際に saveExtensionAuthToken() 側の
-      // getOrCreateExtensionInstanceId() が書き込み前の storage を読んで別 ID を生成し、
-      // instanceId 不一致でトークンが拒否される競合が起きるため。
-      const extensionInstanceId = crypto.randomUUID();
-      chrome.storage.local.set({ extensionInstanceId }, () => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve(extensionInstanceId);
-      });
-    });
+  void runDetachedTask(() => scheduleAlarms(), {
+    label: 'installed alarm scheduling',
   });
-}
-
-// instanceId 生成を 1 経路に直列化する。port 接続(GET_EXTENSION_INSTANCE_ID)と
-// content script からの auth-status 経路が空 storage に同時アクセスしても、同一の
-// in-flight Promise を共有して同じ ID に解決させ、二重生成による不一致を防ぐ。
-let instanceIdPromise = null;
-function getOrCreateInstanceId() {
-  if (!instanceIdPromise) {
-    instanceIdPromise = readOrCreateInstanceId().catch((error) => {
-      instanceIdPromise = null; // 失敗時は次回再試行できるようリセット
-      throw error;
-    });
-  }
-  return instanceIdPromise;
-}
+  void runDetachedTask(() => handleInstalledDemo(details), {
+    label: 'installed demo flow',
+  });
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'extensionInstanceId') return;
@@ -225,7 +360,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // content script はこのメッセージ経由で ID を取得し、自前生成せず background に一本化する。
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'GET_OR_CREATE_INSTANCE_ID') return;
 
   getOrCreateInstanceId()
