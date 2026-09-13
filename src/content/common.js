@@ -247,25 +247,46 @@ export function openMemoSidebar({
   // 二重送信防止（Enter リピート・保存連打・Enter/click 競合）。
   let submitting = false;
   const submit = () => {
-    if (submitting) return;
+    if (submitting || closed || superseded) return;
     submitting = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中…';
+    saveStatus.textContent = '';
+    nameInput.disabled = true;
     const enriched = {
       ...data,
       clipName: nameInput.value.trim(),
     };
-    const result = onSave ? onSave(enriched) : sendData(enriched);
-    Promise.resolve(result)
-      .catch(() => console.error('保存に失敗しました'))
-      .finally(() => {
+    Promise.resolve()
+      .then(() => onSave ? onSave(enriched) : sendData(enriched))
+      .then((result) => {
+        // キューに永続化できた場合は、同期待ちでも再保存しない。
+        if (result?.ok === false && result?.queued !== true) {
+          throw new Error('Save was rejected');
+        }
         // 再オープンで置き換えられた旧セッションは、新しい入力中の再生状態に触れない。
         if (
           !closed &&
           !superseded &&
           (!activeMemoSession || activeMemoSession === session)
         ) {
-          videoPlayer?.play?.();
+          // 再生の拒否を保存失敗として扱わない。
+          try {
+            Promise.resolve(videoPlayer?.play?.()).catch(() => {});
+          } catch {
+            // プレイヤーが取り外されても保存は完了している。
+          }
         }
         closeSidebar();
+      })
+      .catch(() => {
+        if (closed || superseded) return;
+        submitting = false;
+        saveBtn.disabled = false;
+        saveBtn.textContent = '再試行';
+        nameInput.disabled = false;
+        saveStatus.textContent = '保存できませんでした。入力は保持されています。もう一度お試しください。';
+        nameInput.focus();
       });
   };
 
@@ -325,6 +346,11 @@ export function openMemoSidebar({
   saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
   saveBtn.onclick = submit;
   sb.appendChild(saveBtn);
+
+  const saveStatus = document.createElement('div');
+  saveStatus.setAttribute('role', 'alert');
+  saveStatus.style.cssText = 'font-size:12px;color:#fff;';
+  sb.appendChild(saveStatus);
 
   document.body.appendChild(sb);
 
