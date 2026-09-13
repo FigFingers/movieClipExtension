@@ -16,7 +16,7 @@
 /**
  * @typedef {Object} ClipListProps
  * @property {ClipDataProps[]} items
- * @property {(clipId: string | number | undefined) => void} [onSelect]
+ * @property {(clip: ClipDataProps) => void} [onSelect]
  */
 
 /**

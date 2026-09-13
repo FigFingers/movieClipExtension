@@ -4,7 +4,7 @@ export const MAX_PLAYBACK_URL_LENGTH = 4096;
 export const PLAYBACK_OWNER_STORAGE_KEY = 'playbackOwnerNonce';
 export const PLAYBACK_OWNER_QUERY_PARAM = 'dextPlaybackOwner';
 
-const STRING_LIMITS = Object.freeze({
+export const STRING_LIMITS = Object.freeze({
   title: 500,
   clipname: 500,
   user: 200,

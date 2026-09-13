@@ -4,7 +4,6 @@ import {
   COLOR_DEFAULT as ICON_COLOR_DEFAULT,
   createIcon
 } from "../ui/icons.js";
-import { getApiEndpoint } from './../api.js';
 import {
   clearAutoNavigation,
   closeMemoSidebar,
@@ -37,6 +36,7 @@ import {
   setPlaybackContext
 } from './playbackContext.js';
 import { commitSelectedClip } from './netflixClipSelection.js';
+import { loadClipList } from './clipList.js';
 import {
   addPlaybackOwnerToUrl,
   beginPlaybackHandoff,
@@ -92,6 +92,7 @@ function initializeNetflixPlayback() {
   const SELECTOR_EPISODE  = '[data-uia="control-episodes"]';
   const SELECTOR_FWD10    = '[data-uia="control-forward10"]';
   const SELECTOR_SUBTITLE = '[data-uia="control-audio-subtitle"]';
+  const SELECTOR_VIDEO_TITLE = '[data-uia="video-title"]';
 
   const COLOR_DEFAULT = ICON_COLOR_DEFAULT;
   const COLOR_LOOPING = ICON_COLOR_ACTIVE;
@@ -198,11 +199,22 @@ function initializeNetflixPlayback() {
   bootstrapRecordControls();
   startTabVisibilityToggle();
 
+  /**
+   * 再生中の作品名を返す。h4 を持つ動画は作品名とエピソード名が分かれているので h4 を、
+   * 持たない動画は要素全体を使う。録画時のタイトルと記録一覧の絞り込みで規則を共有する。
+   */
+  function readSeriesTitle() {
+    const titleElement = document.querySelector(SELECTOR_VIDEO_TITLE);
+    if (!titleElement) return "";
+    const seriesElement = titleElement.querySelector("h4");
+    return cleanTitleText((seriesElement ?? titleElement).textContent);
+  }
+
   function bootstrapRecordControls() {
     const RECORD_BUTTON_ID = "record-button";
     const RECORD_SELECTORS = {
       videoPlayer: "video",
-      videoTitle: '[data-uia="video-title"]',
+      videoTitle: SELECTOR_VIDEO_TITLE,
       controlsStandard: '[data-uia="controls-standard"]',
       controlVolume: '[data-uia^="control-volume-"]',
       controlForward10: '[data-uia="control-forward10"]'
@@ -262,14 +274,12 @@ function initializeNetflixPlayback() {
               const spans = allTitleName.querySelectorAll("span");
               const episodeTitle = cleanTitleText(spans[1]?.textContent);
 
+              payload.title = readSeriesTitle();
               if (h4Element) {
-                payload.title = cleanTitleText(h4Element.textContent);
                 const episodeNumber = cleanTitleText(spans[0]?.textContent);
                 if (episodeNumber) {
                   payload.epnumber = episodeNumber;
                 }
-              } else {
-                payload.title = cleanTitleText(allTitleName.textContent);
               }
 
               payload.clipName = buildClipName(payload.title, episodeTitle);
@@ -542,6 +552,8 @@ function initializeNetflixPlayback() {
     const title = document.createElement("strong");
     title.textContent = "記録一覧";
     const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.setAttribute("aria-label", "記録一覧を閉じる");
     closeBtn.textContent = "×";
     closeBtn.style.cssText = "background:red;color:#fff;border:none;cursor:pointer;font-size:14px;";
     closeBtn.onclick = toggleSidebar;
@@ -554,7 +566,10 @@ function initializeNetflixPlayback() {
     sb.appendChild(listContainer);
 
     document.body.appendChild(sb);
-    fetchDataAndRender(listContainer);
+    void loadClipList(listContainer, {
+      title: readSeriesTitle(),
+      onLoaded: (items) => renderClipList(listContainer, { items, onSelect: selectClip }),
+    });
   }
 
   function closeSidebar() {
@@ -573,52 +588,35 @@ function initializeNetflixPlayback() {
       // API 由来の文字列を扱うため innerHTML は使わない (refs #97)
       const heading = document.createElement("div");
       const headingText = document.createElement("strong");
-      headingText.textContent = `${item.title}（${item.epnumber}）`;
+      // epnum を持たない作品があるため、話数は取れたときだけ添える。
+      headingText.textContent = item.epnumber
+        ? `${item.title}（${item.epnumber}）`
+        : item.title;
       heading.appendChild(headingText);
       const userRow = document.createElement("div");
-      userRow.textContent = `ユーザー: ${item.user}`;
+      userRow.textContent = `ユーザー: ${item.user || "ユーザー不明"}`;
       const rangeRow = document.createElement("div");
       rangeRow.textContent = `範囲: ${formatSeconds(item.startTime)} - ${formatSeconds(item.endTime)}`;
       entry.append(heading, userRow, rangeRow);
       const jumpBtn = document.createElement("button");
       jumpBtn.textContent = "▶ このClipへジャンプ";
       jumpBtn.style.cssText = "margin-top:4px;background:#0f0;color:#000;border:none;padding:4px 8px;cursor:pointer;";
-      jumpBtn.onclick = () => onSelect?.(item.id);
+      jumpBtn.onclick = () => onSelect?.(item);
       entry.appendChild(jumpBtn);
       container.appendChild(entry);
-    }
-  }
-
-  async function fetchDataAndRender(container) {
-    try {
-      const res = await fetch(getApiEndpoint('random10'));
-      const data = await res.json();
-      /** @type {ClipDataProps[]} */
-      const items = data.allReceivedData || [];
-
-      if (!items.length) {
-        container.textContent = "データがありません。";
-        return;
-      }
-      renderClipList(container, { items, onSelect: (clipId) => selectClip(clipId) });
-    } catch {
-      container.textContent = "データの取得に失敗しました。";
-      console.error("API取得に失敗しました");
     }
   }
 
   // ---------------------------------------------------------------------------
   // Clip選択 → Cookie保存 → サービス別ジャンプ
   // ---------------------------------------------------------------------------
-  async function selectClip(clipId) {
+  async function selectClip(clip) {
     try {
-      const res = await fetch(getApiEndpoint(`fetchClip?id=${encodeURIComponent(clipId)}`));
-      if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
-      const data = await res.json();
+      // 一覧の応答に再生へ必要な項目が揃っているため、単体取得の往復は行わない。
       const ownerNonce = createPlaybackOwnerNonce();
       await commitSelectedClip({
-        data,
-        requestedClipId: clipId,
+        data: clip,
+        requestedClipId: clip?.id,
         ownerNonce,
         storage: {
           async set(snapshot) {
