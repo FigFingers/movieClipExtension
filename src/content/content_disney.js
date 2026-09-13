@@ -2,6 +2,7 @@ import {
   clearAutoNavigation,
   detectService,
   EXT_UI_CLASS,
+  formatSeconds,
   handleOwnedPlaybackRouteChange,
   markAutoNavigation,
   markExtUi,
@@ -171,8 +172,8 @@ import {
     const STYLE_ID = 'dext-control-style';
 
     const BUTTONS = [
-      { id: 'dext-left-button', area: 'left', label: 'Left Button', action: myCustomActionLeft },
-      { id: 'dext-right-button-1', area: 'right', label: 'Right Button 1', action: myCustomActionRight1 },
+      { id: 'dext-left-button', area: 'left', label: '録画', action: myCustomActionLeft },
+      { id: 'dext-right-button-1', area: 'right', label: 'ループ', action: myCustomActionRight1 },
       {
         id: 'dext-right-button-2',
         area: 'right',
@@ -433,7 +434,6 @@ import {
 
         const payload = {
           clipName: clipName,
-          user: "testUser",
           service: detectService(),
           StartTime: starttime,   // Netflix 形式に合わせる
           EndTime: endtime,       // Netflix 形式に合わせる
@@ -623,16 +623,6 @@ import {
   const Service = (() => {
     const DPlusTime = (() => {
 
-      function formatTime(sec) {
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = sec % 60;
-
-        return h > 0
-          ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-          : `${m}:${String(s).padStart(2, "0")}`;
-      }
-
       function getTime() {
         // aria-valuenow/valuemax（秒）は .progress-bar__seekable-range 側に付く。
         const slider = getProgressSlider();
@@ -646,8 +636,8 @@ import {
         return {
           currentSeconds: current,
           totalSeconds  : total,
-          currentTime   : formatTime(current),
-          totalTime     : formatTime(total),
+          currentTime   : formatSeconds(current),
+          totalTime     : formatSeconds(total),
           progress      : `${((current / total) * 100).toFixed(2)}%`
         };
       }
