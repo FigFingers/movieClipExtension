@@ -487,3 +487,28 @@ test('memo Escape respects IME composition and restores focus on close', async (
   assert.equal(escape.defaultPrevented, true);
   assert.equal(document.activeElement, trigger);
 });
+
+test('formatSeconds renders m:ss under an hour and h:mm:ss at or above one hour', async () => {
+  installDom();
+  const { formatSeconds } = await loadCommonModule();
+
+  assert.equal(formatSeconds(0), '0:00');
+  assert.equal(formatSeconds(9), '0:09');
+  assert.equal(formatSeconds(65), '1:05');
+  assert.equal(formatSeconds(599), '9:59');
+  assert.equal(formatSeconds(3599), '59:59');
+  assert.equal(formatSeconds(3600), '1:00:00');
+  assert.equal(formatSeconds(3661), '1:01:01');
+  assert.equal(formatSeconds(7325), '2:02:05');
+});
+
+test('formatSeconds floors fractions and clamps invalid input to zero', async () => {
+  installDom();
+  const { formatSeconds } = await loadCommonModule();
+
+  assert.equal(formatSeconds(65.9), '1:05');
+  assert.equal(formatSeconds(-30), '0:00');
+  assert.equal(formatSeconds(Number.NaN), '0:00');
+  assert.equal(formatSeconds(Number.POSITIVE_INFINITY), '0:00');
+  assert.equal(formatSeconds(), '0:00');
+});
