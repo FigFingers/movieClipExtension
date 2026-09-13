@@ -16,8 +16,6 @@ function isTrustedOrigin(origin) {
   return TRUSTED_ORIGINS.has(origin);
 }
 
-console.log('[extension-link] content script loaded on', location.href);
-
 // トークンの期限チェック・自動リフレッシュは background(tokenRefresh.js)が
 // chrome.alarms と SW 起動時に行う。content 側では何もしない。
 
@@ -32,13 +30,8 @@ window.addEventListener('message', (event) => {
   if (!data || typeof data !== 'object') return;
   if (data.type !== 'GET_EXTENSION_INSTANCE_ID') return;
 
-  console.log('[extension-link] GET_EXTENSION_INSTANCE_ID received', {
-    requestId: data.requestId,
-  });
-
   const port = chrome.runtime.connect({ name: 'extensionInstanceId' });
   port.onMessage.addListener((response) => {
-    console.log('[extension-link] background response', response);
     window.postMessage(
       { type: 'EXTENSION_INSTANCE_ID_RESPONSE', requestId: data.requestId, ...response },
       window.location.origin
