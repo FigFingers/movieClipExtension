@@ -2,6 +2,8 @@
 
 A Chrome extension that allows you to easily clip scenes from Netflix videos.
 
+コーディングエージェント向けの開発・検証・PR 作成手順は [AGENTS.md](AGENTS.md) を参照してください。
+
 ## 🚀 Setup Instructions
 
 ### 1. Install dependencies
