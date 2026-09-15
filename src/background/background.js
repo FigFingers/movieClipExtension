@@ -1,4 +1,8 @@
-import { syncPendingQueue } from './sync.js';
+import {
+  fetchClipComments,
+  postClipComment,
+} from './comments.js';
+import { openLoginTab, syncPendingQueue } from './sync.js';
 import { checkAndRefreshToken } from './tokenRefresh.js';
 
 const DEMO_BASE_URL = 'http://localhost:3000/';
@@ -36,7 +40,7 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // クリップ同期は background で fetch する(content の fetch はページオリジンの CORS で
 // サイト API に弾かれるため)。ログインタブ起動も sync 側(openLoginTab)が直接行う。
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'SYNC_PENDING_CLIPS') return;
 
   syncPendingQueue(message.options || {})
@@ -49,6 +53,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }));
 
   return true;
+});
+
+function respondToAsyncRequest(promise, sendResponse, reason = 'request_failed') {
+  promise
+    .then((result) => sendResponse(result))
+    .catch((error) => sendResponse({
+      ok: false,
+      reason,
+      message: error?.message,
+    }));
+
+  return true;
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'FETCH_CLIP_COMMENTS') {
+    return respondToAsyncRequest(fetchClipComments({
+      clipId: message.clipId,
+      cursor: message.cursor,
+      limit: message.limit,
+    }), sendResponse);
+  }
+
+  if (message?.type === 'POST_CLIP_COMMENT') {
+    return respondToAsyncRequest(postClipComment({
+      clipId: message.clipId,
+      body: message.body,
+    }), sendResponse);
+  }
+
+  if (message?.type === 'OPEN_LOGIN_TAB') {
+    return respondToAsyncRequest(
+      openLoginTab({ force: true }),
+      sendResponse,
+      'open_login_failed'
+    );
+  }
 });
 
 function scheduleAlarms() {

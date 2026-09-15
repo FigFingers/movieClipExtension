@@ -1,10 +1,15 @@
 /** @typedef {import('../types/clip').CacheItem} CacheItem */
 
-window.addEventListener("clipSelected", () => {
-  const playClipData = getCookies();
-  chrome.storage.local.set({ clip: playClipData });
-  chrome.storage.local.set({ playClipSystemKey: 1 });
-  safeSetStorage({ playmode: "clip" });
+window.addEventListener("clipSelected", (event) => {
+  // 再生モードの遷移は 1 回の書き込みにまとめる。分割すると commentPanel が
+  // 「新しい clip + 前回の playmode」を読み、直前のプレイリストのクリップの
+  // コメントを表示する瞬間が生まれる。
+  safeSetStorage({
+    clip: withDetailClipId(getCookies(), event?.detail),
+    playClipSystemKey: 1,
+    playlistSystemKey: 0,
+    playmode: "clip",
+  });
 });
 
 // ------------------------------------------------------
@@ -55,9 +60,12 @@ window.addEventListener("message", async (event) => {
   // ---- クリップデータ受信 ----
   if (msg.type === "SET_CLIP_DATA") {
     const { clip } = msg.payload;
-    await chrome.storage.local.set({ clip });
-    await safeSetStorage({ playmode: "clip" });
-    chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0 });
+    await safeSetStorage({
+      clip,
+      playClipSystemKey: 1,
+      playlistSystemKey: 0,
+      playmode: "clip",
+    });
   }
 
   // ---- プレイリスト再生開始 ----
@@ -76,9 +84,9 @@ window.addEventListener("message", async (event) => {
       return;
     }
 
-    // サイト側の playQueue は表示順の配列で order フィールドを持たない。
-    // 再生側 (content_netflix / content_disney) は order を正として現在位置・次クリップを
-    // 解決するため、欠落時は配列添字で補完しておく（order 付きで来た場合はそれを尊重）。
+    // サイト側は playQueue の各項目に id と order（0 始まりの配列添字）を必ず付ける。
+    // 再生側 (content_netflix / content_disney) と commentPanel は order を正として
+    // 現在位置・次クリップを解決するため、旧サイト向けに欠落時は配列添字で補完する。
     const normalizedQueue = queue.map((item, index) => ({
       ...item,
       order: Number.isFinite(Number(item?.order)) ? Number(item.order) : index,
@@ -89,7 +97,15 @@ window.addEventListener("message", async (event) => {
       normalizedQueue[0].order
     );
 
-    await safeSetStorage({ playQueue: normalizedQueue, currentClipOrder: firstOrder, playmode: "playlist" });
+    // 単体再生の clip は破棄する。サイト側もプレイリスト開始時に clipId cookie を
+    // 失効させており、プレイリスト再生中に前回の単体クリップを現在クリップとして
+    // 解決できる余地を残さない。
+    await safeSetStorage({
+      clip: null,
+      playQueue: normalizedQueue,
+      currentClipOrder: firstOrder,
+      playmode: "playlist",
+    });
     playQueue(normalizedQueue);
   }
 
@@ -108,6 +124,28 @@ function getCookies() {
     cookieObj[key] = decodeURIComponent(value || "");
   }
   return cookieObj;
+}
+
+/**
+ * clipId は cookie ではなく clipSelected の detail を正とする。
+ * サイトは id を持たないクリップのハンドオフで clipId cookie を失効させるが、
+ * 失効が届かなくても前回の clipId を引き継がないようにする。
+ * detail を読めない場合（旧サイト）は cookie の値をそのまま使う。
+ *
+ * @param {Record<string, string>} clip
+ * @param {unknown} detail
+ */
+function withDetailClipId(clip, detail) {
+  if (!detail || typeof detail !== "object") return clip;
+
+  const clipId = /** @type {{ clipId?: unknown }} */ (detail).clipId;
+  if (clipId !== undefined && clipId !== null) {
+    return { ...clip, clipId: String(clipId) };
+  }
+
+  return Object.fromEntries(
+    Object.entries(clip).filter(([key]) => key !== "clipId")
+  );
 }
 
 // ------------------------------------------------------
