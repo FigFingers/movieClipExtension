@@ -25,6 +25,33 @@ class FakeEventTarget {
       listener(event);
     }
   }
+
+  dispatchEvent(event) {
+    this.dispatch(event);
+    return true;
+  }
+}
+
+class FakeMutationObserver {
+  static instances = [];
+
+  constructor(callback) {
+    this.callback = callback;
+    this.connected = false;
+    FakeMutationObserver.instances.push(this);
+  }
+
+  observe() {
+    this.connected = true;
+  }
+
+  disconnect() {
+    this.connected = false;
+  }
+
+  trigger() {
+    if (this.connected) this.callback([]);
+  }
 }
 
 class FakeElement extends FakeEventTarget {
@@ -39,10 +66,20 @@ class FakeElement extends FakeEventTarget {
       transition: '',
       width: '',
     };
+    this.dataset = {};
+    this.attributes = new Map();
+    this.className = '';
     this.id = '';
     this.textContent = '';
     this.value = '';
     this.onclick = null;
+  }
+
+  get isConnected() {
+    return (
+      this === this.ownerDocument.body ||
+      this.parentElement?.isConnected === true
+    );
   }
 
   append(...children) {
@@ -59,6 +96,14 @@ class FakeElement extends FakeEventTarget {
 
   contains(target) {
     return target === this || this.children.some((child) => child.contains(target));
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
   }
 
   focus() {
@@ -99,24 +144,46 @@ class FakeDocument extends FakeEventTarget {
     return visit(this.body);
   }
 
-  querySelector() {
-    return null;
+  querySelector(selector) {
+    const visit = (element) => {
+      if (
+        selector.startsWith('.') &&
+        element.className.split(/\s+/).includes(selector.slice(1))
+      ) {
+        return element;
+      }
+      if (selector === element.tagName.toLowerCase()) return element;
+      for (const child of element.children) {
+        const match = visit(child);
+        if (match) return match;
+      }
+      return null;
+    };
+    return visit(this.body);
   }
 }
 
-function createKeyboardEvent(target) {
+function createKeyboardEvent(
+  target,
+  { key = 'Enter', isComposing = false, repeat = false } = {},
+) {
   return {
     type: 'keydown',
     target,
-    key: 'Enter',
-    isComposing: false,
-    repeat: false,
+    key,
+    isComposing,
+    repeat,
     defaultPrevented: false,
     propagationStopped: false,
+    immediatePropagationStopped: false,
     preventDefault() {
       this.defaultPrevented = true;
     },
     stopPropagation() {
+      this.propagationStopped = true;
+    },
+    stopImmediatePropagation() {
+      this.immediatePropagationStopped = true;
       this.propagationStopped = true;
     },
   };
@@ -155,6 +222,8 @@ function installDom() {
   globalThis.document = document;
   globalThis.window = window;
   globalThis.location = { href: 'https://www.netflix.com/watch/1' };
+  FakeMutationObserver.instances = [];
+  globalThis.MutationObserver = FakeMutationObserver;
   return { document, window };
 }
 
@@ -220,6 +289,71 @@ test('reopening on another player restores both original widths', async () => {
   assert.equal(secondPlayer.style.width, '85%');
 });
 
+test('failed saves retain the draft and allow retry, including synchronous throws', async () => {
+  for (const fail of [
+    () => { throw new Error('storage unavailable'); },
+    () => Promise.reject(new Error('storage unavailable')),
+    () => ({ ok: false }),
+  ]) {
+    const { document } = installDom();
+    const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+    const player = document.createElement('video');
+    player.style.width = '80%';
+    let playCount = 0;
+    player.play = () => { playCount += 1; };
+    let saveCount = 0;
+    const sidebar = openMemoSidebar({
+      videoPlayer: player,
+      onSave: (data) => {
+        assert.equal(data.clipName, '入力したメモ');
+        saveCount += 1;
+        return saveCount === 1 ? fail() : { ok: true };
+      },
+    });
+    const controls = sidebarControls(sidebar);
+    controls.nameInput.value = '入力したメモ';
+    controls.saveButton.onclick();
+    controls.saveButton.onclick();
+    assert.equal(controls.saveButton.disabled, true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(saveCount, 1);
+    assert.equal(document.getElementById(MEMO_SIDEBAR_ID), sidebar);
+    assert.equal(controls.nameInput.value, '入力したメモ');
+    assert.equal(controls.nameInput.disabled, false);
+    assert.equal(controls.saveButton.disabled, false);
+    assert.match(sidebar.children[4].textContent, /保存できませんでした/);
+    assert.equal(playCount, 0);
+
+    controls.saveButton.onclick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(saveCount, 2);
+    assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+    assert.equal(player.style.width, '80%');
+    assert.equal(playCount, 1);
+  }
+});
+
+test('a queued save closes once even when sync and playback fail', async () => {
+  const { document } = installDom();
+  const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  player.play = () => Promise.reject(new Error('play blocked'));
+  let saveCount = 0;
+  const sidebar = openMemoSidebar({
+    videoPlayer: player,
+    onSave: () => {
+      saveCount += 1;
+      return { ok: false, queued: true };
+    },
+  });
+  const controls = sidebarControls(sidebar);
+  controls.saveButton.onclick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+  controls.saveButton.onclick();
+  assert.equal(saveCount, 1);
+});
+
 test('Enter submits only from the name input', async () => {
   const { document, window } = installDom();
   const { openMemoSidebar } = await loadCommonModule();
@@ -253,4 +387,220 @@ test('Enter submits only from the name input', async () => {
 
   assert.equal(saveCount, 1);
   assert.equal(inputEnter.defaultPrevented, true);
+  assert.equal(inputEnter.immediatePropagationStopped, true);
+});
+
+test('closeMemoSidebar fully tears down the active session', async () => {
+  const { document, window } = installDom();
+  const { closeMemoSidebar, MEMO_SIDEBAR_ID, openMemoSidebar } =
+    await loadCommonModule();
+  const player = document.createElement('video');
+  player.style.width = '70%';
+  let closeCount = 0;
+
+  openMemoSidebar({
+    videoPlayer: player,
+    onClose: () => {
+      closeCount += 1;
+    },
+  });
+
+  assert.equal(player.style.width, 'calc(100% - 20%)');
+  assert.equal(window.listeners.get('keydown')?.size, 1);
+  assert.equal(document.listeners.get('focusin')?.size, 1);
+
+  assert.equal(closeMemoSidebar(), true);
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+  assert.equal(player.style.width, '70%');
+  assert.equal(window.listeners.get('keydown')?.size, 0);
+  assert.equal(document.listeners.get('focusin')?.size, 0);
+  assert.equal(closeCount, 1);
+  assert.equal(closeMemoSidebar(), false);
+});
+
+test('superseding a memo session does not call its close callback', async () => {
+  const { document } = installDom();
+  const { closeMemoSidebar, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  let firstCloseCount = 0;
+
+  openMemoSidebar({
+    videoPlayer: player,
+    onClose: () => {
+      firstCloseCount += 1;
+    },
+  });
+  openMemoSidebar({ videoPlayer: player });
+
+  assert.equal(firstCloseCount, 0);
+  closeMemoSidebar();
+});
+
+test('opening a memo requests that the comment panel close', async () => {
+  const { document, window } = installDom();
+  const {
+    CLOSE_COMMENT_PANEL_EVENT,
+    closeMemoSidebar,
+    openMemoSidebar,
+  } = await loadCommonModule();
+  const player = document.createElement('video');
+  let closeRequestCount = 0;
+  window.addEventListener(CLOSE_COMMENT_PANEL_EVENT, () => {
+    closeRequestCount += 1;
+  });
+
+  openMemoSidebar({ videoPlayer: player });
+
+  assert.equal(closeRequestCount, 1);
+  closeMemoSidebar();
+});
+
+test('opening a memo after the Netflix clip list preserves the true player width', async () => {
+  const { document } = installDom();
+  const { closeMemoSidebar, MEMO_SIDEBAR_ID, openMemoSidebar } =
+    await loadCommonModule();
+  const player = document.createElement('div');
+  player.className = 'watch-video--player-view';
+  player.style.width = '65%';
+  document.body.appendChild(player);
+
+  const clipList = document.createElement('div');
+  clipList.id = MEMO_SIDEBAR_ID;
+  clipList.dataset.sidebarType = 'clip-list';
+  clipList.dataset.originalPlayerWidth = player.style.width;
+  document.body.appendChild(clipList);
+  player.style.width = 'calc(100% - 30%)';
+
+  const memo = openMemoSidebar({ videoPlayer: player });
+
+  assert.notEqual(memo, null);
+  assert.equal(clipList.parentElement, null);
+  assert.equal(player.style.width, 'calc(100% - 20%)');
+
+  closeMemoSidebar();
+  assert.equal(player.style.width, '65%');
+});
+
+test('site-side removal tears down memo listeners and restores the exact width', async () => {
+  const { document, window } = installDom();
+  const { closeMemoSidebar, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  player.style.width = '';
+  const save = createDeferred();
+  let playCount = 0;
+  player.play = () => {
+    playCount += 1;
+  };
+  let closeCount = 0;
+
+  const sidebar = openMemoSidebar({
+    videoPlayer: player,
+    onSave: () => save.promise,
+    onClose: () => {
+      closeCount += 1;
+    },
+  });
+  const mountObserver = FakeMutationObserver.instances.at(-1);
+
+  assert.equal(mountObserver?.connected, true);
+  sidebarControls(sidebar).saveButton.onclick();
+  sidebar.remove();
+  mountObserver.trigger();
+
+  assert.equal(player.style.width, '');
+  assert.equal(window.listeners.get('keydown')?.size, 0);
+  assert.equal(document.listeners.get('focusin')?.size, 0);
+  assert.equal(mountObserver.connected, false);
+  assert.equal(closeCount, 1);
+  assert.equal(closeMemoSidebar(), false);
+
+  save.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(playCount, 0);
+});
+
+test('memo Escape respects IME composition and restores focus on close', async () => {
+  const { document, window } = installDom();
+  const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+  const player = document.createElement('video');
+  const trigger = document.createElement('button');
+  document.body.appendChild(trigger);
+  trigger.focus();
+
+  const sidebar = openMemoSidebar({ videoPlayer: player });
+  const controls = sidebarControls(sidebar);
+
+  assert.equal(sidebar.getAttribute('role'), 'dialog');
+  assert.equal(
+    sidebar.getAttribute('aria-labelledby'),
+    `${MEMO_SIDEBAR_ID}-title`,
+  );
+  assert.equal(controls.closeButton.getAttribute('aria-label'), '録画メモを閉じる');
+
+  const composingEscape = createKeyboardEvent(controls.nameInput, {
+    key: 'Escape',
+    isComposing: true,
+  });
+  window.dispatch(composingEscape);
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), sidebar);
+  assert.equal(composingEscape.defaultPrevented, false);
+  assert.equal(composingEscape.immediatePropagationStopped, true);
+
+  const escape = createKeyboardEvent(controls.nameInput, { key: 'Escape' });
+  window.dispatch(escape);
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+  assert.equal(escape.defaultPrevented, true);
+  assert.equal(document.activeElement, trigger);
+});
+
+test('formatSeconds renders m:ss under an hour and h:mm:ss at or above one hour', async () => {
+  installDom();
+  const { formatSeconds } = await loadCommonModule();
+
+  assert.equal(formatSeconds(0), '0:00');
+  assert.equal(formatSeconds(9), '0:09');
+  assert.equal(formatSeconds(65), '1:05');
+  assert.equal(formatSeconds(599), '9:59');
+  assert.equal(formatSeconds(3599), '59:59');
+  assert.equal(formatSeconds(3600), '1:00:00');
+  assert.equal(formatSeconds(3661), '1:01:01');
+  assert.equal(formatSeconds(7325), '2:02:05');
+});
+
+test('formatSeconds floors fractions and clamps invalid input to zero', async () => {
+  installDom();
+  const { formatSeconds } = await loadCommonModule();
+
+  assert.equal(formatSeconds(65.9), '1:05');
+  assert.equal(formatSeconds(-30), '0:00');
+  assert.equal(formatSeconds(Number.NaN), '0:00');
+  assert.equal(formatSeconds(Number.POSITIVE_INFINITY), '0:00');
+  assert.equal(formatSeconds(), '0:00');
+});
+
+test('cleanTitleText strips zero-width characters and trims', async () => {
+  installDom();
+  const { cleanTitleText } = await loadCommonModule();
+
+  // Netflix の話数 span は文字間に U+FEFF が挿入される
+  assert.equal(cleanTitleText('\uFEFFエ\uFEFFピ\uFEFFソ\uFEFFー\uFEFFド16: '), 'エピソード16:');
+  assert.equal(cleanTitleText('物怪\u200Bと武士'), '物怪と武士');
+  assert.equal(cleanTitleText('  刃牙道  '), '刃牙道');
+  assert.equal(cleanTitleText('\uFEFF\u200B'), '');
+  assert.equal(cleanTitleText(undefined), '');
+  assert.equal(cleanTitleText(null), '');
+  assert.equal(cleanTitleText(42), '');
+});
+
+test('buildClipName joins the series and episode titles', async () => {
+  installDom();
+  const { buildClipName } = await loadCommonModule();
+
+  assert.equal(buildClipName('刃牙道', '物怪と武士'), '刃牙道｜物怪と武士');
+  assert.equal(buildClipName('\uFEFF刃牙道', ' 物怪と武士 '), '刃牙道｜物怪と武士');
+  // span が 1 つしか無い動画では作品名だけを返す
+  assert.equal(buildClipName('刃牙道', ''), '刃牙道');
+  assert.equal(buildClipName('刃牙道', undefined), '刃牙道');
+  assert.equal(buildClipName('', '物怪と武士'), '物怪と武士');
+  assert.equal(buildClipName(undefined, undefined), '');
 });

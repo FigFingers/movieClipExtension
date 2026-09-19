@@ -1,6 +1,7 @@
 /**
  * @typedef {Object} ClipDataProps
  * @property {string} [title]
+ * @property {string} [clipName]
  * @property {string} [user]
  * @property {string|number} [startTime]
  * @property {string|number} [endTime]
@@ -15,7 +16,7 @@
 /**
  * @typedef {Object} ClipListProps
  * @property {ClipDataProps[]} items
- * @property {(clipId: string | number | undefined) => void} [onSelect]
+ * @property {(clip: ClipDataProps) => void} [onSelect]
  */
 
 /**

@@ -36,6 +36,7 @@ export function setCookie(name, value, options = {}) {
     parts.push("");
   }
 
+  // biome-ignore lint/suspicious/noDocumentCookie: Cookie Store API is unavailable in some supported extension contexts.
   document.cookie = parts.join("; ");
 }
 
