@@ -1,6 +1,6 @@
 # Design Doc — Movie Clipper（仮称）
 
-ステータス: たたき台 v0.5 / 作成日: 2026-09-11 / 更新日: 2026-10-01 / 設計オーナー: 未定 / 対応する PRD: v1.2
+ステータス: たたき台 v0.5 / 作成日: 2026-09-11 / 更新日: 2026-10-02 / 設計オーナー: 未定 / 対応する PRD: v1.3
 
 ## 1. 目的と前提
 
@@ -53,7 +53,8 @@
 - **記録と同期:** 視聴タブで区間を記録すると、拡張はまず端末のキュー（`pendingClips`）に保存し、Background がサイトの API へ送る。サイトが受理した記録だけをキューから外す。
 - **連携:** サイトの画面で連携ボタンを押すと、拡張の `extensionInstanceId` とサイトのアカウントが結び付き、拡張は以後 Bearer トークンで API を呼ぶ。
 - **再生:** サイトのライブラリやプレイリストから再生すると、サイトの画面が拡張へクリップを引き継ぎ、視聴タブが開く。拡張は視聴タブごとに再生対象（所有権）を持ち、区間の終わりやプレイリストの次の項目を制御する。
-- **コメント:** 視聴タブで再生中のクリップに対して、コメントを読み書きする。
+- **コメント:** 視聴タブで再生中のクリップに対して、コメントを読み書きする。コメントは公開され、他の利用者のコメントも表示する。
+- **公開と発見:** 同期済みのクリップとプレイリストはサイトで公開する。ホーム・検索で他の利用者の場面を探し、お気に入りや自分のプレイリストに加えられる。他の利用者に示す利用者の情報は作成者名だけ。
 
 ### 2.2 実行環境とモジュール
 
@@ -213,7 +214,7 @@ flowchart LR
 | `ENQUEUE_PENDING_CLIP` | 視聴タブ | 未同期のキューへ追加する | キュー専用の直列化を通す |
 | `SYNC_PENDING_CLIPS` | 視聴タブ、サイトの画面 | 同期を起動して結果を返す | `options.openLoginIfMissingToken` |
 | `SAVE_EXTENSION_AUTH_TOKEN`、`UNLINK_EXTENSION` | サイトの画面の content script | 認証状態の保存・消去 | 認証の排他を通す |
-| `FETCH_CLIP_LIST` | Netflix の視聴タブ | 記録一覧の取得 | 認証しない（G-01） |
+| `FETCH_CLIP_LIST` | Netflix の視聴タブ | 記録一覧の取得 | 公開の一覧を認証なしで取得する（§8） |
 | `FETCH_CLIP_COMMENTS`、`POST_CLIP_COMMENT` | 視聴タブ | コメント API | 認証の排他を通す |
 | `OPEN_LOGIN_TAB` | コメントパネル | `/login` を開く | 60 秒の間隔制限あり |
 | `seek` | Netflix の視聴タブ | MAIN world で Netflix のプレイヤーを seek する | 送信元タブが `netflix.com/watch/` のときだけ |
@@ -495,7 +496,7 @@ stateDiagram-v2
 - 送信できない記録の内容の確認と削除は、拡張が持つページ（例: `chrome-extension://<id>/queue.html`）で行い、サイトの画面のボタンから `OPEN_QUEUE_PAGE` で開く。記録の中身をサイトの画面のスクリプトに渡さず、削除を拡張の画面上の操作に限るため。
 - 視聴ページの通知（§6.3）からも同じページを開ける。
 
-## 8. 一覧とライブラリ（FR-06、FR-13、NFR-01）
+## 8. 一覧・ライブラリと公開の機能（FR-06、FR-13〜17、NFR-01）
 
 ### 8.1 現在の実装
 
@@ -510,17 +511,25 @@ stateDiagram-v2
 
 ### 8.2 目標設計【提案】
 
-PRD の「保存クリップは非公開」（§13）に合わせ、クリップを返すすべての経路を本人に限る（G-01）。
+PRD の公開範囲（§5、§13）では、クリップとプレイリストは公開し、他の利用者に示す利用者の情報は作成者名（ニックネーム）だけとする。公開の一覧はそのまま使い、応答の項目を絞る（G-01）。
 
 | 経路 | 変更 |
 | --- | --- |
-| サイトのライブラリ | `GET /api/v1/me/clips?title=&cursor=&limit=` を加える（セッション必須、本人のクリップだけ）。`/my_video` はこれを使い、作品名・クリップ名での絞り込みを付ける |
-| `GET /api/v1/clips` | セッションを必須にし、本人以外の `userId` の指定は拒否する。ホームと検索の公開一覧は、PRD に合わせて本人の範囲に変えるか、提供範囲から外す |
-| 拡張の記録一覧 | `GET /api/extension/clips?extensionInstanceId=&title=&limit=` を加える（Bearer、連携先の利用者のクリップだけ）。`FETCH_CLIP_LIST` はコメントと同じく認証の排他とトークンを使い、401 は連携待ちとして表示する |
-| 応答の項目 | `id`、`name`、`title`、`epnum`、`startMs`、`endMs`、`url`、`vod.code`、`createdAt` に限る。利用者の属性は返さない |
-| 拡張の一覧の表示 | 自分のクリップだけになるため「ユーザー」の行を外し、クリップ名と区間を表示する |
+| 公開の一覧（`GET /api/v1/clips`、`GET /api/v1/playlists`） | 認証なしの公開一覧のままとする。作成者は `{id, name}` だけを返す（サイト #77 で対応済み、未マージ）。未ログインの閲覧を許すかは PRD §13 で決める |
+| サイトのライブラリ | `/my_video` に作品名・クリップ名での絞り込みを付ける（G-16）。本人のクリップの取得は、`userId` の指定ではなく `GET /api/v1/me/clips` のようなセッション基準の経路にする |
+| 拡張の記録一覧 | 公開の一覧で他の利用者のクリップも表示する。自分のクリップを区別するため、Bearer で受け付けて各行に `isOwn` を付ける `GET /api/extension/clips?extensionInstanceId=&title=&limit=` を加える。未連携のときは区別せずに表示する |
+| 応答の項目 | `id`、`name`、`title`、`epnum`、`startMs`、`endMs`、`url`、`vod.code`、`createdAt`、作成者名に限る。メールアドレスなどの利用者情報は返さない |
 
 記録一覧は Disney+ にも用意する（FR-13、推奨の要件）。
+
+### 8.3 公開の機能（FR-14〜17）
+
+| 機能 | サイトの現状 | 必要な作業【提案】 |
+| --- | --- | --- |
+| ホーム・検索（FR-14） | ホーム（`/`）と検索（`/search`）が `GET /api/v1/clips` で公開一覧を表示する。複数語の検索とスコア順はサイト #62 で接続し直す | 公開プレイリストのカードをホームに並べる。各行にお気に入りの状態を表示する |
+| お気に入り（FR-15） | `GET`・`POST /api/v1/me/favorites/clips`、`/api/v1/me/favorites/playlists` がある。画面は無い。一覧で 500 になる不具合（サイト Issue #79）はサイト #77 で修正 | ★の切替と、マイビデオの「お気に入り」欄を作る（G-25） |
+| プレイリストへのコメント（FR-16） | API も DB も無い（サイト #62 はクリップへのコメントだけ） | `playlist_comments` と API をクリップへのコメントと同じ規則（本文、冪等キー、削除、通報、投稿頻度）で作る。拡張のコメントパネルにプレイリストのタブを加える（G-26） |
+| アカウント情報の変更（FR-17） | `/account` は表示だけ。`GET /api/v1/me` だけで、変更の API が無い。使用サブスクは `GET`・`POST /api/v1/me/vods` がある | ニックネームとメールアドレスの変更 API と画面を作る（G-27）。Google のログインで得たメールアドレスを変えられるかは、認証の方式と合わせて決める |
 
 ## 9. 再生の引き継ぎと制御（FR-05、FR-07、FR-08）
 
@@ -660,11 +669,11 @@ sequenceDiagram
 
 規則: 本文は NUL を含まない 1〜500 コードポイント。投稿は 1 分あたり 30 件まで（429 `COMMENT_RATE_LIMITED`）。`clientRequestId` が使用済みなら同じ投稿を返し、内容が違うか削除済みなら 409 `IDEMPOTENCY_KEY_REUSED`。`atMs` はクリップの区間内（外れたら 400 `AT_MS_OUT_OF_RANGE`）。退会した所有者のクリップへの新規投稿は 409 `CLIP_OWNER_RETIRED`。
 
-### 10.3 公開範囲の食い違いと目標設計（G-02）
+### 10.3 公開コメントとモデレーション（G-02）
 
-サイト #62 では、連携済み・ログイン済みの任意の利用者が、任意の有効なクリップのコメントを読み、投稿できる（`listExtensionClipComments` と `createCommentWithPolicies` に所有者の確認が無い）。通報の宛先がクリップの所有者であるなど、複数の利用者が書き込む前提の設計である。PRD は「本人が自分のクリップに付けたコメントだけを本人が閲覧できる」と定めている。
+サイト #62 のコメントは公開型で、PRD の公開範囲と一致する。連携済み・ログイン済みの利用者は、有効なクリップのコメントを読み、投稿できる。投稿者は自分のコメントを、クリップの作成者は自分のクリップに付いたコメントを削除できる。通報はクリップの作成者が確認する（サイトの `CommentModal.tsx`）。
 
-【提案】一覧と投稿の両方の API（拡張用と v1）で、クリップの所有者が要求者本人であることを確認し、違えば 404 にする（存在を明かさない）。初期版では通報とモデレーションの UI を出さない。PRD を公開型に改める場合は §18 の決定とし、本書とテストを合わせて変える。
+拡張のコメントパネルは一覧と投稿だけで、削除と通報ができない（G-02）。【提案】拡張用の API に削除と通報を加え（今は v1 のセッション API だけ）、パネルの各コメントに操作を出す。自分のコメントと、自分のクリップに付いたコメントだけに削除を表示する。通報を運営も確認するかは PRD §13 で決める。
 
 ### 10.4 冪等な投稿【提案】（G-09）
 
@@ -691,7 +700,7 @@ sequenceDiagram
 | サイトの画面のスクリプト → 再生ブリッジ | `getClipData.js` が source、origin、型を確認する。`playbackBridgeValidation.js` が clipId、サービスと URL のホスト、HTTPS、認証情報・明示ポートの禁止、時間、件数 100・512 KiB、文字列の長さを確認する | 不正な入力では既存の再生状態を変えず、理由を返す |
 | 視聴タブの content script → Background | `background.js` のメッセージの分岐、`playbackOwnership.js` が `sender.tab.id`・nonce・経路・snapshot を照合する | ページが申告したタブ ID で所有権を決めない。別のタブ、古い nonce、期限切れを拒否する。登録簿の継承プロパティを読み書きしない |
 | Background → サイトの API | `src/api.js` の接続先、`manifest.json` の `host_permissions`、サイトの `cors.ts` と各 route | Origin の不許可は 403。Bearer が無い・不正・期限切れ・失効は 401。Origin の許可と利用者の認証は別の検査 |
-| JSON → サイトの DB | `extension.schema.ts` の Zod、`extensions.ts` の連携認証と受理記録、クリップとコメントのサービス層 | UUID、重複 ID、時間、URL を検証する。要求に含まれる userId で所有者を上書きしない。非公開を API の経路でも守る（G-01、G-02） |
+| JSON → サイトの DB | `extension.schema.ts` の Zod、`extensions.ts` の連携認証と受理記録、クリップとコメントのサービス層 | UUID、重複 ID、時間、URL を検証する。要求に含まれる userId で所有者を上書きしない。公開の API で作成者名以外の利用者情報を返さない。他人のデータを変更させない（G-01） |
 | サイトの API → 拡張の保存データと画面 | `sync.js` が `acceptedItemIds` を照合し、`comments.js` と `clips.js` が応答を検証・正規化する | 不正な受理 ID でキューを消さない。外部由来のタイトルやコメントは `textContent` で表示し、HTML として挿入しない |
 | サイトの v1 の書き込み API | `src/server/http/csrf.ts`（サイト #77） | 別オリジンからの書き込みを拒否する（サイト Issue #78） |
 
@@ -745,7 +754,7 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 | G-05 | 単体・プレイリストの終了時の一時停止とループの切替、区間の外へのシーク |
 | G-11 | 保存の再試行で `clientItemId` が変わらない |
 | G-09 | 結果が不明な失敗の後の再投稿で、同じ `clientRequestId` を送る |
-| G-01、G-02 | 他人の `userId` や `clipId` を指定した一覧とコメントが取得できない（サイト） |
+| G-01 | 公開の API の応答に作成者名以外の利用者情報が含まれない。他人のクリップ・コメントを変更・削除できない（クリップ作成者によるコメントの削除を除く）（サイト） |
 | 引き継ぎの成功系 | `clipSelected` の成功、正常な `SET_CLIP_DATA`、プレイリストの成功と nonce 付きの遷移（正典の §8 が不足として挙げる経路） |
 
 ### 15.3 実機確認
@@ -766,8 +775,8 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 
 | ID | 重要度 | 内容 | 根拠 | 対応案 | 担当 |
 | --- | --- | --- | --- | --- | --- |
-| G-01 | must | クリップの一覧 API が認証なしで全利用者のクリップを返し、拡張の記録一覧も他人のクリップを表示する。サイト develop は作成者の `users` 行を全列返す | サイト `src/app/api/v1/clips/route.ts:16-31`、`src/server/repositories/clips.ts:83`、Issue #76。拡張 `clips.js:94-95` | §8.2 | サイト、拡張 |
-| G-02 | must | コメントを任意の利用者が読み書きできる | サイト #62 `src/server/services/comments.ts`（`listExtensionClipComments`、`createCommentWithPolicies`） | §10.3 | サイト |
+| G-01 | must | 公開の一覧 API が、作成者の `users` 行をメールアドレスとパスワードハッシュの列を含む全列で返す | サイト `src/server/repositories/clips.ts:83`、Issue #76 | サイト #77 をマージする（作成者を `{id, name}` に限る）。公開 API の応答項目をテストで固定する | サイト |
+| G-02 | better | 拡張のコメントパネルで、コメントの削除と通報ができない | 拡張 `commentPanel.js`、サイト #62 の拡張用コメント API（一覧と投稿だけ） | §10.3 | 両方 |
 | G-03 | must | 1 件の不正な記録で全件が同期できない | §7.3、§7.4 | §7.4 | 拡張（サイトは任意） |
 | G-04 | must | Disney+ の録画に区間と作品名の検証が無い | `content_disney.js:412-455` | §6.3 | 拡張 |
 | G-05 | must | 終了とループの規則が PRD と違う | §9.4 | §9.4 | 拡張 |
@@ -790,6 +799,9 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 | G-22 | better | 記録中に遷移しても Disney+ は録画状態を解除しない | §6.1 | §6.3 | 拡張 |
 | G-23 | better | Netflix の seek が公開されていない内部 API と単位の推定に依存する | `background.js#handleSeekMessage` | 実機での回帰確認を手順にする | 拡張 |
 | G-24 | better | Netflix の記録一覧から再生すると、クリップの内容を Netflix の Cookie に書く（読み手なし） | `content_netflix.js:651-664` | `setClipDataOnCookies` を削除する | 拡張 |
+| G-25 | better | お気に入りの API はあるが、★とお気に入り一覧の画面が無い | サイト `src/app/api/v1/me/favorites/*`、Issue #79 | §8.3 | サイト |
+| G-26 | better | プレイリストへのコメントの API・DB が無い | サイト #62（クリップへのコメントだけ） | §8.3 | 両方 |
+| G-27 | better | アカウント情報（ニックネーム・メールアドレス）を変更できない | サイト `src/app/api/v1/me/route.ts`（GET だけ） | §8.3 | サイト |
 
 ## 17. マージの条件・順序と移行
 
@@ -798,7 +810,7 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 1. サイト #62 をマージしてから、拡張 #136 をマージする。拡張は単体再生の引き継ぎで `detail.clipId` と `service` の Cookie を必須にしており（`playbackBridgeValidation.js:292-311`）、サイト develop の `openClipPlayback`（`src/lib/clips/playback.ts:109-135`）はどちらも送らない。#136 が先に入ると、サイトからの単体再生の引き継ぎがすべて拒否される（タブは開くが区間再生しない）。
 2. #136 のマージ時に、PR 本文のサイト develop の基準を `3f29d55` から `7d8de67` に更新し（引用している行は変わらない）、正典ドキュメントを取り込む（§17.3）。
 3. サイト #77 を、付け直した #62 の上に積み直してマージする（同期の競合と退会、v1 の CSRF、並び順、利用者属性の制限）。
-4. 非公開化（G-01、G-02）をサイトと拡張で行う。拡張の記録一覧は、新しい API が使えるようになるまで機能フラグで止め、未実装の API を呼ばない。
+4. 公開 API の利用者情報の制限（G-01）はサイト #77 のマージで解消する。拡張の記録一覧で自分のクリップを区別する API（§8.2）は、サイトが対応するまで呼ばず、区別なしで表示する。
 5. 拡張の保存と同期の改善（G-03、G-04、G-06、G-07、G-11、G-19、G-20）。
 6. 再生の終了とループの統一（G-05）、再生開始の観測（G-21）。
 7. 配布の設定（G-12）。
@@ -817,7 +829,8 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 
 | 論点 | 選択肢 | 推奨 |
 | --- | --- | --- |
-| クリップとコメントの公開範囲 | (a) PRD どおり非公開にし、サイトの公開一覧と他者のコメントの閲覧をやめる (b) PRD を公開型へ改訂する | (a)。PRD §13 で確定した方針で、今の公開一覧は利用者属性の露出（Issue #76）も伴う |
+| 再生中の操作画面 | (a) 今のように、配信サイトの操作バーへボタンを差し込む (b) 当初の画面設計（PRD 付録B）のように、プレイヤーの下部に独自の操作バーを出す | 未決定（PRD §13）。(b) は Issue #119 の Shadow DOM オーバーレイに載せれば両サービスで同じ見た目にできるが、配信サイトの操作バーと重なる位置の調整が要る |
+| クリップの非公開設定、未ログインの閲覧 | クリップ・プレイリスト単位の非公開を設けるか。ログインしていない人に公開一覧を見せるか | PRD §13 で決める。今のサイトは非公開設定が無く、未ログインでも一覧を見られる |
 | 同期の 400 で項目を特定する方法 | (a) サイトが項目ごとの結果を返す (b) 拡張が分割して送り直す | (a) を本命とし、サイトが対応するまで (b) で補う |
 | 連携先アカウントの変更 | (a) 記録に連携先の値を持たせ、違えば保留して確認する (b) 未同期の記録があれば連携を止める (c) 何もしない | (a)。扱いは PRD §13 で決める |
 | 連携トークンの受け渡し | (a) 今どおりサイトの画面を経由する (b) 単回トークンだけを画面から渡し、Background が交換する | (b)。サイトと拡張の両方の変更が要る |
@@ -827,7 +840,7 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 | 対象サイトの画面変更 | — | Netflix と Disney+ の DOM や内部 API の変更で、記録と再生が止まりうる。実機確認の手順を定期的に回す |
 | 提供・運用 | 本番 URL、許可 Origin、拡張の配布方法、SLO の計測、ログの保持期間 | PRD §13 で決める |
 
-保存クリップとコメントの初期の非公開は PRD で確定済み。初期版に別アカウントへの再連携のフローは加えない。
+公開範囲は PRD v1.3 で公開型に変更した。初期版に別アカウントへの再連携のフローは加えない。
 
 ## 19. 参照ファイル
 
@@ -835,4 +848,4 @@ PRD §11 の SLO を品質目標とする。端末への記録の応答、同期
 - サイト（develop と #62）: `src/app/api/extension/{link-token,link,sync,token/refresh,unlink,session}/route.ts`、`src/app/api/extension/clips/[clipId]/comments/route.ts`、`src/app/api/v1/clips/route.ts`、`src/server/schemas/{extension,legacy-clips,clips,comments}.schema.ts`、`src/server/services/{extensions,legacy-clips,clips,comments}.ts`、`src/server/repositories/clips.ts`、`src/server/http/cors.ts`、`src/lib/extension/{client,handoffRequest}.ts`、`src/lib/clips/playback.ts`、`src/components/{ExtensionLinkButton,ExtensionUnlinkButton,ExtensionPlaybackHandoffStatus}.tsx`、`src/app/(site_data)/(protected)/{account,my_video,playlists/[playlistId]}/`、`prisma/schema.prisma`、`openapi/v1.yaml`。
 - サイト（#77）: `src/server/services/extensions.ts`、`src/server/http/csrf.ts`、`src/server/repositories/{clips,playlists}.ts`、`tests/extension/sync.test.mjs`。
 
-本書で求めるキューの保全、厳密な受理 ID の確認、同期結果の表示、非公開の API 認可は、記述しただけでは実装の完了にならない。各変更 PR の差分と実行結果を別に追跡する。
+本書で求めるキューの保全、厳密な受理 ID の確認、同期結果の表示、公開 API の応答項目の制限は、記述しただけでは実装の完了にならない。各変更 PR の差分と実行結果を別に追跡する。
