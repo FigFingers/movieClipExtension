@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { before } from 'node:test';
+import { after, before } from 'node:test';
 import {
-  DISNEY_ID, NETFLIX_ID, assertTimes, fakeUrls, mockTest,
+  DISNEY_ID, NETFLIX_ID, assertTimes, fakeUrls, finishSuite, mockTest,
   prepareSuite, pressRecord, record, save, waitFor,
 } from './support/fixture.mjs';
 
 before(prepareSuite, { timeout: 60_000 });
+after(finishSuite);
 
 mockTest('netflix-queue', 'Netflix: 保存した名前・作品・区間を未連携のキューに残す', async (f) => {
   const page = await f.open();
@@ -50,7 +51,7 @@ mockTest('short-range', 'Netflix: 1 秒未満の区間を拒否し、その後�
   const page = await f.open();
   await page.locator('video').evaluate((v) => v.pause());
   await pressRecord(page);
-  const dialogPromise = page.waitForEvent('dialog');
+  const dialogPromise = f.expectDialog(page, '録画範囲が短すぎます');
   await pressRecord(page);
   const dialog = await dialogPromise;
   assert.equal(dialog.message(), '録画範囲が短すぎます');
@@ -109,8 +110,12 @@ mockTest('retry-500', '同期エラー: 500 の後もキューを保持し alarm
   assert.equal(pending.length, 1);
   assert.equal(f.syncRequests().at(-1).status, 500);
   assert.equal(f.mock.store.state.clips.some((c) => c.name === '再送するクリップ'), false);
+  // Service Worker の起動時の再送と区別するため、印を付けた同じ Service Worker が送ったことを確かめる。
+  await (await f.browser.getServiceWorker()).evaluate(() => { globalThis.__beforeAlarm = true; });
+  assert.equal(f.syncRequests().length, 1);
   await f.browser.fireAlarm('extension-sync-retry');
   await waitFor('再送後のキュー消去', async () => (await f.pending()).length === 0);
+  assert.equal(await (await f.browser.getServiceWorker()).evaluate(() => globalThis.__beforeAlarm === true), true, 'alarm ではなく Service Worker の再起動で再送した');
   const requests = f.syncRequests();
   assert.deepEqual(requests.map((r) => r.status), [500, 200]);
   assert.equal(requests[1].body.items[0].clientItemId, pending[0].clientItemId);

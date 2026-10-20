@@ -100,7 +100,9 @@ async function fulfillFromMock(route, mockOrigin) {
  * @param {string} mockOrigin モックに直接つなぐ URL（http://127.0.0.1:<port>）
  */
 export function routeFakeServices(context, mockOrigin) {
-  return context.route(FAKE_SERVICE_PATTERN, (route) => fulfillFromMock(route, mockOrigin));
+  // モックへの要求が切れた・閉じた後の要求は失敗として返し、返せなければ捨てる。
+  return context.route(FAKE_SERVICE_PATTERN, (route) => fulfillFromMock(route, mockOrigin)
+    .catch(() => route.abort('failed').catch(() => {})));
 }
 
 /**
@@ -153,11 +155,13 @@ export async function launchExtensionBrowser({
     const waiting = context.waitForEvent('serviceworker', { timeout });
     // サイトのページで拡張に問い合わせると、Service Worker が起きる。
     const page = await context.newPage();
-    await page.goto(`${SITE_ORIGIN}/__mock`, { waitUntil: 'domcontentloaded' }).catch(() => {});
-    await page.evaluate(() => window.postMessage({ type: 'GET_EXTENSION_INSTANCE_ID', requestId: 'wake' }, location.origin)).catch(() => {});
-    const worker = await waiting;
-    await page.close();
-    return worker;
+    try {
+      await page.goto(`${SITE_ORIGIN}/__mock`, { waitUntil: 'domcontentloaded' }).catch(() => {});
+      await page.evaluate(() => window.postMessage({ type: 'GET_EXTENSION_INSTANCE_ID', requestId: 'wake' }, location.origin)).catch(() => {});
+      return await waiting;
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
 
   return {

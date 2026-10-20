@@ -15,6 +15,8 @@ export const DISNEY_ID = '5f0c0001-0000-4000-8000-000000000001';
 let suiteDir;
 let catalog;
 let extension;
+let registered = 0;
+let passed = 0;
 
 export async function prepareSuite() {
   const out = path.join(root, 'out', 'e2e');
@@ -30,6 +32,11 @@ export async function prepareSuite() {
   extension = await harness.prepareExtension(root, path.join(suiteDir, 'extension'));
 }
 
+/** 全テストが通ったときだけ、この実行のフォルダーを消す（失敗時の診断は残す）。 */
+export async function finishSuite() {
+  if (suiteDir && passed === registered) await rm(suiteDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
+}
+
 export async function waitFor(label, read, { timeout = 10_000 } = {}) {
   const deadline = Date.now() + timeout;
   do {
@@ -41,12 +48,14 @@ export async function waitFor(label, read, { timeout = 10_000 } = {}) {
 }
 
 export function mockTest(id, title, run) {
+  registered += 1;
   test(title, { timeout: 60_000 }, async (t) => {
     const work = path.join(suiteDir, id);
     await mkdir(work, { recursive: true });
     const mock = mockApi.createMockServer({ port: 0, catalog });
     let browser;
     const errors = [];
+    const expectedDialogs = [];
     try {
       const { port, origin } = await mock.listen();
       mock.store.state.settings.fake.netflix.controlsAutoHide = false;
@@ -63,8 +72,10 @@ export function mockTest(id, title, run) {
       const attach = (page) => {
         page.on('pageerror', (error) => errors.push(error.message));
         page.on('dialog', (dialog) => {
-          errors.push(`dialog: ${dialog.message()}`);
-          void dialog.dismiss();
+          const index = expectedDialogs.indexOf(dialog.message());
+          if (index === -1) errors.push(`dialog: ${dialog.message()}`);
+          else expectedDialogs.splice(index, 1);
+          dialog.dismiss().catch(() => {});
         });
       };
       browser.context.on('page', attach);
@@ -75,6 +86,11 @@ export function mockTest(id, title, run) {
         errors,
         pending: async () => (await browser.storage(['pendingClips'])).pendingClips || [],
         syncRequests: () => mock.store.state.requests.filter((r) => r.path === '/api/extension/sync'),
+        /** 出ると分かっている dialog を待つ。それ以外の dialog はテストの失敗にする。 */
+        expectDialog(page, message) {
+          expectedDialogs.push(message);
+          return page.waitForEvent('dialog');
+        },
         async open(service = 'netflix', id = NETFLIX_ID) {
           const page = await browser.context.newPage();
           const url = service === 'netflix' ? fakeUrls.netflixWatch(id) : fakeUrls.disneyPlay(id);
@@ -88,10 +104,16 @@ export function mockTest(id, title, run) {
           await page.goto(`${harness.SITE_ORIGIN}/login?callbackUrl=/account`);
           await page.locator('[data-testid="login-as-1"]').click();
           await page.waitForURL('**/account');
-          await Promise.all([
-            page.waitForEvent('load'),
-            page.locator('[data-testid="link-button"]').click(),
-          ]);
+          // 成功するとサイトが 800ms 後に再読み込みする。失敗はトーストの文言で報告する。
+          const reloaded = page.waitForEvent('load');
+          reloaded.catch(() => {});
+          await page.locator('[data-testid="link-button"]').click();
+          const toast = page.locator('#toasts .toast.ok, #toasts .toast.error').first();
+          await toast.waitFor();
+          if (await toast.evaluate((el) => el.classList.contains('error'))) {
+            assert.fail(`連携に失敗しました: ${await toast.textContent()}`);
+          }
+          await reloaded;
           const stored = await waitFor('拡張の連携', async () => {
             const value = await browser.storage(['extensionAuthToken', 'extensionLinked', 'extensionInstanceId']);
             return value.extensionLinked && value.extensionAuthToken ? value : null;
@@ -108,7 +130,9 @@ export function mockTest(id, title, run) {
         },
       };
       await run(fixture);
+      assert.deepEqual(errors, [], 'ページの例外か想定外の dialog');
       await browser.context.tracing.stop();
+      passed += 1;
     } catch (error) {
       if (browser) {
         for (const [index, page] of browser.context.pages().entries()) {
@@ -128,7 +152,7 @@ export function mockTest(id, title, run) {
         await browser?.close();
       } finally {
         await mock.close();
-        await rm(path.join(work, 'profile'), { recursive: true, force: true });
+        await rm(path.join(work, 'profile'), { recursive: true, force: true, maxRetries: 5 }).catch(() => {});
       }
     }
   });

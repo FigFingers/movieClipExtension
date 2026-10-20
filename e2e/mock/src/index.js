@@ -17,5 +17,5 @@ export {
   findTestVideo,
   generateTestVideo,
   testVideoPath,
-} from './fake-services/test-video.js';
+} from './fake-services/pattern-video.js';
 export { FAKE_SERVICE_HOSTS, fakeServicePath } from './fake-services/routes.js';

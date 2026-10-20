@@ -282,7 +282,8 @@ export function flattenIssues(issues) {
       continue;
     }
     const key = String(issue.path[0]);
-    (fieldErrors[key] ||= []).push(issue.message);
+    fieldErrors[key] ||= [];
+    fieldErrors[key].push(issue.message);
   }
   return { formErrors, fieldErrors };
 }

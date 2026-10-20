@@ -1,6 +1,5 @@
 // movie-clipper-mock/harness: ブラウザー（Playwright）を動かす道具。
 export { SITE_ORIGIN, launchExtensionBrowser, prepareExtension, routeFakeServices } from './browser.js';
-export { prepareCatalog, resolveExtensionDir } from './options.js';
 
 /** 擬似の配信サービスの URL。 */
 export const fakeUrls = Object.freeze({

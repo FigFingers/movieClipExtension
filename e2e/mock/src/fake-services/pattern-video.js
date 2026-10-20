@@ -174,17 +174,18 @@ export async function generateTestVideo({ durationSeconds, out = testVideoPath(d
   try {
     ({ chromium } = await import('playwright'));
   } catch {
-    throw new Error('テスト用の動画を作るには playwright が必要です（npm install と npm run playwright:install）');
+    throw new Error('テスト用の動画を作るには playwright が必要です（npm ci と npm run test:e2e:install）');
   }
   const require = createRequire(import.meta.url);
   // require の条件で解決すると、ブラウザーで読める build/webm-muxer.js（グローバルの WebMMuxer）になる。
   const muxerScript = require.resolve('webm-muxer');
   mkdirSync(path.dirname(out), { recursive: true });
   const partial = `${out}.partial`;
-  const fd = openSync(partial, 'w');
   let completed = false;
   const browser = await chromium.launch({ channel: 'chromium' });
+  let fd;
   try {
+    fd = openSync(partial, 'w');
     const page = await browser.newPage();
     // WebCodecs は安全なオリジンでだけ使える。中身の無い https のページを route で返す。
     await page.route('https://test-video.invalid/**', (route) => route.fulfill({
@@ -204,7 +205,7 @@ export async function generateTestVideo({ durationSeconds, out = testVideoPath(d
     completed = true;
   } finally {
     await browser.close().catch(() => {});
-    closeSync(fd);
+    if (fd !== undefined) closeSync(fd);
     if (!completed) rmSync(partial, { force: true });
   }
   renameSync(partial, out);

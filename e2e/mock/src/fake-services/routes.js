@@ -7,7 +7,7 @@
 // モックのオリジンで直接開けば（http://127.0.0.1:<ポート>/__fake/netflix/watch/81000001 など）、拡張なしで見た目を確かめられる。
 import { findTitle, publicCatalog } from './catalog.js';
 import { sendMediaFile } from './media.js';
-import { findTestVideo } from './test-video.js';
+import { findTestVideo } from './pattern-video.js';
 import { jsonForScript, redirect, sendHtml, sendText } from '../http.js';
 
 export const FAKE_SERVICE_HOSTS = Object.freeze({
@@ -83,7 +83,7 @@ async function sendMedia(ctx, service, id) {
     await sendMediaFile(ctx.req, ctx.res, testVideo, 'video/webm');
     return;
   }
-  sendText(ctx.res, 404, 'no media for this title (npm run media で作るか、カタログで video を指定してください)');
+  sendText(ctx.res, 404, 'no media for this title (ensureTestVideos で作るか、カタログで video を指定してください)');
 }
 
 export async function handleFakeServices(ctx) {

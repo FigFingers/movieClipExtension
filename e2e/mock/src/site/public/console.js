@@ -1,7 +1,7 @@
 // モック管理の画面。/__mock/api/* を使う。
 const $ = (selector) => document.querySelector(selector);
 
-function escape(value) {
+function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
@@ -17,7 +17,7 @@ async function api(path, init = {}) {
 
 function table(rows, columns) {
   if (rows.length === 0) return '<p class="empty">なし</p>';
-  return `<table class="table"><thead><tr>${columns.map(([label]) => `<th>${escape(label)}</th>`).join('')}</tr></thead>
+  return `<table class="table"><thead><tr>${columns.map(([label]) => `<th>${escapeHtml(label)}</th>`).join('')}</tr></thead>
 <tbody>${rows.map((row) => `<tr>${columns.map(([, render]) => `<td>${render(row)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 }
 
@@ -40,17 +40,17 @@ async function refresh() {
   const users = new Map(state.users.map((user) => [user.id, user.name]));
   $('#linked').innerHTML = table(state.linkedExtensions, [
     ['ID', (row) => row.id],
-    ['利用者', (row) => escape(users.get(row.userId)) + (row.previousUserIds?.length ? `<br><small>以前: ${row.previousUserIds.map((id) => escape(users.get(id))).join(', ')}</small>` : '')],
-    ['instanceId', (row) => `<code>${escape(row.extensionInstanceId)}</code>`],
-    ['期限', (row) => escape(row.expiresAt)],
+    ['利用者', (row) => escapeHtml(users.get(row.userId)) + (row.previousUserIds?.length ? `<br><small>以前: ${row.previousUserIds.map((id) => escapeHtml(users.get(id))).join(', ')}</small>` : '')],
+    ['instanceId', (row) => `<code>${escapeHtml(row.extensionInstanceId)}</code>`],
+    ['期限', (row) => escapeHtml(row.expiresAt)],
     ['更新', (row) => row.rotations ?? 0],
-    ['状態', (row) => (row.revokedAt ? `解除 ${escape(row.revokedAt)}` : '有効')],
+    ['状態', (row) => (row.revokedAt ? `解除 ${escapeHtml(row.revokedAt)}` : '有効')],
     ['', (row) => (row.revokedAt ? '' : `<button data-linked="${row.id}" data-op="revoke" class="secondary">失効</button> <button data-linked="${row.id}" data-op="expire" class="secondary">期限切れ</button> <button data-linked="${row.id}" data-op="soon" class="secondary">期限を 1 日後に</button>`)],
   ]);
   $('#faults').innerHTML = table(state.faults, [
     ['ID', (row) => row.id],
-    ['対象', (row) => `${escape(row.method)} ${escape(row.path)}`],
-    ['種類', (row) => `${escape(row.kind)}${row.kind === 'status' ? ` ${row.status}` : ''}${row.delayMs ? ` +${row.delayMs}ms` : ''}`],
+    ['対象', (row) => `${escapeHtml(row.method)} ${escapeHtml(row.path)}`],
+    ['種類', (row) => `${escapeHtml(row.kind)}${row.kind === 'status' ? ` ${row.status}` : ''}${row.delayMs ? ` +${row.delayMs}ms` : ''}`],
     ['残り', (row) => (row.times === null ? '∞' : row.times)],
     ['当たり', (row) => row.hits],
     ['', (row) => `<button data-fault="${row.id}" class="secondary">消す</button>`],
@@ -58,21 +58,21 @@ async function refresh() {
   const clips = [...state.clips].reverse().slice(0, 30);
   $('#clips').innerHTML = table(clips, [
     ['ID', (row) => row.id],
-    ['利用者', (row) => escape(users.get(row.userId))],
-    ['名前', (row) => escape(row.name)],
-    ['作品', (row) => `${escape(row.title)}${row.epnum ? ` / ${escape(row.epnum)}` : ''}`],
+    ['利用者', (row) => escapeHtml(users.get(row.userId))],
+    ['名前', (row) => escapeHtml(row.name)],
+    ['作品', (row) => `${escapeHtml(row.title)}${row.epnum ? ` / ${escapeHtml(row.epnum)}` : ''}`],
     ['区間', (row) => `${row.startMs / 1000}–${row.endMs / 1000}`],
-    ['URL', (row) => `<code>${escape(row.url)}</code>`],
-    ['由来', (row) => (row.source ? `拡張 #${row.source.linkedExtensionId}<br><small>${escape(row.source.clientItemId)}</small>` : '初期データ')],
+    ['URL', (row) => `<code>${escapeHtml(row.url)}</code>`],
+    ['由来', (row) => (row.source ? `拡張 #${row.source.linkedExtensionId}<br><small>${escapeHtml(row.source.clientItemId)}</small>` : '初期データ')],
   ]);
   $('#requests').innerHTML = table([...requests].reverse().slice(0, 80), [
     ['#', (row) => row.id],
-    ['時刻', (row) => escape(row.at.slice(11, 23))],
-    ['要求', (row) => `${escape(row.method)} ${escape(row.path)}${row.query ? `<br><small>${escape(row.query)}</small>` : ''}`],
-    ['status', (row) => `${escape(row.status)}${row.fault ? ` <span class="tag">障害 #${row.fault.id}</span>` : ''}`],
-    ['Origin', (row) => escape(row.origin || '—')],
-    ['認証', (row) => escape(row.authorization || '—')],
-    ['本文', (row) => (row.body ? `<details><summary>表示</summary><pre>${escape(JSON.stringify(row.body, null, 2))}</pre></details>` : '')],
+    ['時刻', (row) => escapeHtml(row.at.slice(11, 23))],
+    ['要求', (row) => `${escapeHtml(row.method)} ${escapeHtml(row.path)}${row.query ? `<br><small>${escapeHtml(row.query)}</small>` : ''}`],
+    ['status', (row) => `${escapeHtml(row.status)}${row.fault ? ` <span class="tag">障害 #${row.fault.id}</span>` : ''}`],
+    ['Origin', (row) => escapeHtml(row.origin || '—')],
+    ['認証', (row) => escapeHtml(row.authorization || '—')],
+    ['本文', (row) => (row.body ? `<details><summary>表示</summary><pre>${escapeHtml(JSON.stringify(row.body, null, 2))}</pre></details>` : '')],
   ]);
 }
 

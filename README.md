@@ -78,7 +78,7 @@ npm.cmd run test:e2e
 Disney+ の作品時刻による保存、未連携のキューから連携後の同期、500 後の alarm 再送、401 後の認証解除とキュー保持です。
 各テストでブラウザープロファイルとサーバーを作り直すため、普段使う拡張の保存データには触れません。
 
-失敗時には `out/e2e/run-*/<ケース名>/` にスクリーンショット、`trace.zip`、`diagnostics.json` を残します。
+失敗時には `out/e2e/run-*/<ケース名>/` にスクリーンショット、`trace.zip`、`diagnostics.json` を残します（全テストが通った実行のフォルダーは消します）。
 トレースはルートで `npx playwright show-trace <trace.zip のパス>` を実行して確認できます。
 生成する 60 秒の WebM は `out/e2e/media/` にキャッシュします（`MOVIE_CLIPPER_MOCK_CACHE` が設定済みならその場所）。
 
