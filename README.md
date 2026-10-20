@@ -48,7 +48,7 @@ export const API_URL = 'http://localhost:3000/api/';
 ## 🔗 サイト連携の仕組み（概要）
 
 - 連携: サイト `/account` の「拡張機能を連携する」→ `POST /api/extension/link` → `EXT_LINK_WITH_AUTH_TOKEN` postMessage で不透明トークン+有効期限（90日）を拡張が保存
-- 同期: 保存ボタン → `pendingClips`（chrome.storage.local）に enqueue → background が `POST /api/extension/sync`（Bearer）。失敗時は 15 分毎の alarm と SW 起動時に再送
+- 同期: 保存ボタン → background が `pendingClips`（chrome.storage.local）に保存 → パネルを閉じ、別途 `POST /api/extension/sync`（Bearer）。失敗時は 15 分毎の alarm と SW 起動時に再送
 - トークン更新: background が 6 時間毎+SW 起動時に期限を確認し、残り 15 日未満で `POST /api/extension/token/refresh`（ローテーション）
 - 連携解除: サイト `/account` の「連携を解除」→ `POST /api/extension/unlink` → `EXTENSION_UNLINKED` postMessage で拡張がトークン破棄（取り逃しても次回同期の 401 で自己修復）
 
@@ -81,6 +81,7 @@ npm.cmd run test:e2e
 検証するのは Netflix のシリーズ・映画の保存、保存のキャンセル、短すぎる区間の拒否と再録画、
 Disney+ の作品時刻による保存、未連携のキューから連携後の同期、500 後の alarm 再送、401 後の認証解除とキュー保持です。
 両サービスのローカル保存失敗からの再試行と、不正JSONの200・項目不明の400後の再送も検証します。
+配信サービスをまたぐ同時保存と、同期が応答しない場合の通信期限・再送も対象です。
 各テストでブラウザープロファイルとサーバーを作り直すため、普段使う拡張の保存データには触れません。
 
 失敗時には `out/e2e/run-*/<ケース名>/` にスクリーンショット、`trace.zip`、`diagnostics.json` を残します（全テストが通った実行のフォルダーは消します）。

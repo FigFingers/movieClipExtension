@@ -85,24 +85,17 @@ for (const service of ['netflix', 'disney']) {
     const page = await f.open(service, service === 'netflix' ? NETFLIX_ID : DISNEY_ID);
     const recorded = await record(page, service);
     const worker = await f.browser.getServiceWorker();
-    // content script の isolated world で、次のキュー書込みだけを失敗させる。
-    await worker.evaluate(async (url) => {
-      const [tab] = await chrome.tabs.query({ url });
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        world: 'ISOLATED',
-        func: () => {
-          const original = chrome.storage.local.set;
-          chrome.storage.local.set = (items, callback) => {
-            if (Object.hasOwn(items, 'pendingClips')) {
-              chrome.storage.local.set = original;
-              throw new Error('test: local storage write failed');
-            }
-            return original.call(chrome.storage.local, items, callback);
-          };
-        },
-      });
-    }, page.url());
+    // background で、次のキュー書込みだけを失敗させる。
+    await worker.evaluate(() => {
+      const original = chrome.storage.local.set;
+      chrome.storage.local.set = (items, callback) => {
+        if (Object.hasOwn(items, 'pendingClips')) {
+          chrome.storage.local.set = original;
+          throw new Error('test: local storage write failed');
+        }
+        return original.call(chrome.storage.local, items, callback);
+      };
+    });
     const sidebar = page.locator('#nf-memo-sidebar');
     await sidebar.locator('input').fill('失敗しても残る名前');
     await sidebar.getByRole('button', { name: '保存', exact: true }).click();
@@ -149,6 +142,7 @@ mockTest('retry-500', '同期エラー: 500 の後もキューを保持し alarm
   const page = await f.open();
   await record(page);
   await save(page, '再送するクリップ');
+  await waitFor('500応答', () => f.syncRequests().find((request) => request.status === 500));
   const pending = await f.pending();
   assert.equal(pending.length, 1);
   assert.equal(f.syncRequests().at(-1).status, 500);
@@ -171,6 +165,7 @@ mockTest('revoked-token', '同期エラー: 401 では連携トークンを破�
   const page = await f.open();
   await record(page);
   await save(page, '再連携を待つクリップ');
+  await waitFor('401後の認証解除', async () => !(await f.browser.storage(['extensionAuthToken'])).extensionAuthToken);
   const pending = await f.pending();
   assert.equal(pending.length, 1);
   assert.equal(pending[0].clipName, '再連携を待つクリップ');
@@ -191,6 +186,7 @@ for (const [id, status, options] of [
     const page = await f.open();
     await record(page);
     await save(page, '応答不明でも残すクリップ');
+    await waitFor('不正応答の受信', () => f.syncRequests().find((request) => request.status === status));
     const pending = await f.pending();
     assert.equal(pending.length, 1);
     assert.equal(f.syncRequests().at(-1).status, status);
@@ -202,3 +198,33 @@ for (const [id, status, options] of [
     assert.equal(f.mock.store.state.clips.filter((c) => c.name === pending[0].clipName).length, 1);
   });
 }
+
+mockTest('concurrent-service-saves', '同時保存: NetflixとDisney+のクリップを両方保持する', async (f) => {
+  const [netflix, disney] = await Promise.all([f.open(), f.open('disney', DISNEY_ID)]);
+  const recorded = await Promise.all([record(netflix), record(disney, 'disney')]);
+  await Promise.all([save(netflix, 'Netflixの同時保存'), save(disney, 'Disney+の同時保存')]);
+  const pending = await f.pending();
+  assert.equal(pending.length, 2);
+  const netflixClip = pending.find((clip) => clip.service === 'Netflix');
+  const disneyClip = pending.find((clip) => clip.service === 'Disney+');
+  assert.equal(netflixClip.clipName, 'Netflixの同時保存');
+  assert.equal(disneyClip.clipName, 'Disney+の同時保存');
+  assert.notEqual(netflixClip.clientItemId, disneyClip.clientItemId);
+  assertTimes(netflixClip, recorded[0]);
+  assertTimes(disneyClip, recorded[1], 1.1);
+});
+
+mockTest('sync-timeout', '応答停止: 同期の期限切れ後もキューを保持しalarmで再送できる', async (f) => {
+  await f.link();
+  await f.fault(500, { kind: 'hang' });
+  const page = await f.open();
+  await record(page);
+  await save(page, '応答停止でも残るクリップ');
+  const pending = await f.pending();
+  assert.equal(pending.length, 1);
+  await f.browser.fireAlarm('extension-sync-retry');
+  await waitFor('期限切れ後の再送', async () => (await f.pending()).length === 0, { timeout: 25_000 });
+  assert.equal(f.syncRequests().at(-1).status, 200);
+  assert.equal(f.syncRequests().at(-1).body.items[0].clientItemId, pending[0].clientItemId);
+  assert.equal(f.mock.store.state.clips.filter((clip) => clip.name === pending[0].clipName).length, 1);
+});

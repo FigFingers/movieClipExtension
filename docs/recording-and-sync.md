@@ -1,24 +1,26 @@
 # 録画保存と同期
 
-対象実装: [common.js](../src/content/common.js)、[extensionSync.js](../src/content/extensionSync.js)、[sync.js](../src/background/sync.js)。
+対象実装: [common.js](../src/content/common.js)、[memoSidebar.js](../src/content/memoSidebar.js)、[clipQueue.js](../src/background/clipQueue.js)、[sync.js](../src/background/sync.js)。
 
 ## 保存パネル
 
-Netflix・Disney+ は共通の `openMemoSidebar()` を使います。保存ボタン、または名前入力欄での Enter で保存します。
+Netflix・Disney+ は `common.js` の `openMemoSidebar()` から共通のUIモジュールを呼び出します。保存ボタン、または名前入力欄での Enter で保存します。
 IME 変換中の Enter とキーリピートでは送信しません。
 
-1. 名前の前後の空白を除去し、録画した作品・区間と一緒にローカルの `pendingClips` へ保存します。
-2. background にサイト同期を依頼します。未連携・通信失敗でもローカル保存済みなら保存パネルを閉じ、動画の再生を再開します。
+1. 名前の前後の空白を除去し、background に録画した作品・区間を送ります。background がローカルの `pendingClips` へ保存し、完了を応答します。
+2. サイト同期を依頼し、その応答を待たずに保存パネルを閉じて動画の再生を再開します。未連携・通信失敗でもローカル保存済みのクリップを保持します。
 3. ローカル保存自体が失敗した場合はパネルと入力名・録画区間を保持し、パネル内にエラーを表示します。同じ保存ボタンで再試行できます。
 
 保存中はボタンを無効化し、クリックと Enter が重なっても二重送信しません。
 パネルを閉じたり別のパネルを開いたりした後に古い保存が完了しても、現在の動画やパネルを変更しません。
 保存中にパネルを閉じても、開始済みの保存処理自体は取り消しません。
 再生の再開が拒否されても保存は完了扱いとし、保存済みクリップの再送を促しません。
+パネルを開くたびに録画のIDと作成時刻を固定し、保存の再試行時も引き継ぎます。
 
 ## サイト同期
 
 サイト API への通信は background service worker が行います。
+通信とJSON本文の読込みに合計15秒の期限を設けています。期限切れは通信失敗としてキューを保持します。
 キューの `clientItemId` を維持して再送し、サーバー側の重複防止に利用します。
 
 | 応答・状態 | キューの扱い |
@@ -45,3 +47,4 @@ IME 変換中の Enter とキーリピートでは送信しません。
 - [record-sync.spec.mjs](../e2e/record-sync.spec.mjs): 両サービスの保存・保存失敗後の再試行、サイト連携と alarm 再送。
 
 実行方法は[テスト](testing.md)を参照してください。
+同時保存と認証更新の設計は[設計と責務の境界](architecture.md)にまとめています。

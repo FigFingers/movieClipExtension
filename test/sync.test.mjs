@@ -127,6 +127,6 @@ for (const status of [401, 403, 500]) {
     const result = await syncPendingQueue();
     assert.equal(result.queued, true);
     assert.equal(stored.pendingClips.length, 2);
-    assert.equal(stored.extensionAuthToken, status === 401 ? undefined : 'test-token');
+    assert.equal(stored.extensionAuthToken, status === 401 ? null : 'test-token');
   });
 }

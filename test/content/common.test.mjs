@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-const commonSourceUrl = new URL('../../src/content/common.js', import.meta.url);
 let moduleSequence = 0;
 
 class FakeEventTarget {
@@ -133,21 +131,8 @@ function createDeferred() {
 }
 
 async function loadCommonModule() {
-  const source = await readFile(commonSourceUrl, 'utf8');
-  const importPattern =
-    /import\s*\{[\s\S]*?\}\s*from '\.\/extensionSync\.js';/;
-  const testableSource = source.replace(
-    importPattern,
-    'const enqueueClip = async () => ({ clientItemId: "test" });\n' +
-      'const syncPendingQueue = async () => ({ ok: true });',
-  );
-  assert.notEqual(testableSource, source, 'extensionSync import should be replaced');
-
   moduleSequence += 1;
-  const encoded = Buffer.from(
-    `${testableSource}\n//# sourceURL=common-test-${moduleSequence}.mjs`,
-  ).toString('base64');
-  return import(`data:text/javascript;base64,${encoded}`);
+  return import(new URL(`../../src/content/memoSidebar.js?case=${moduleSequence}`, import.meta.url));
 }
 
 function installDom() {
@@ -363,4 +348,25 @@ test('closing during a save prevents a late completion from resuming playback', 
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(playCount, 0);
   assert.equal(closeCount, 1);
+});
+
+test('the public facade keeps one client ID and creation time across save retries', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const { document } = installDom();
+  const { openMemoSidebar } = await import('../../src/content/common.js');
+  const attempts = [];
+  const sidebar = openMemoSidebar({
+    videoPlayer: document.createElement('video'),
+    data: { StartTime: 10, EndTime: 20 },
+    onSave: (data) => {
+      attempts.push(data);
+      if (attempts.length === 1) throw new Error('try again');
+    },
+  });
+  const controls = sidebarControls(sidebar);
+  await controls.saveButton.onclick();
+  await controls.saveButton.onclick();
+  assert.ok(attempts[0].clientItemId);
+  assert.equal(attempts[0].clientItemId, attempts[1].clientItemId);
+  assert.equal(attempts[0].createdAt, attempts[1].createdAt);
 });

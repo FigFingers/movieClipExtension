@@ -1,4 +1,7 @@
+import { runAuthExclusive as runExclusive } from './exclusive.js';
+import { removePendingClipIds } from './clipQueue.js';
 import { getApiEndpoint, getSiteUrl } from './../api.js';
+import { requestJson } from './request.js';
 import {
   STORAGE_KEYS,
   storageGet,
@@ -15,17 +18,6 @@ import {
 const LOGIN_PROMPT_STORAGE_KEY = 'extensionLoginPromptLastOpenedAt';
 const LOGIN_PROMPT_COOLDOWN_MS = 60 * 1000;
 
-// sync とトークンリフレッシュを直列化するミューテックス。ローテーション中に旧トークンで
-// sync が走ると 401 → トークン誤クリアになるため、両者は必ずこれを通す。
-let exclusiveChain = Promise.resolve();
-export function runExclusive(task) {
-  const run = exclusiveChain.then(() => task());
-  exclusiveChain = run.then(
-    () => {},
-    () => {}
-  );
-  return run;
-}
 
 function toExtensionSyncItem(clip) {
   const payload = {
@@ -52,12 +44,6 @@ function toExtensionSyncItem(clip) {
   };
 }
 
-function parseResponseJson(response) {
-  return response
-    .json()
-    .catch(() => null);
-}
-
 function collectClientItemIds(value, ids = new Set()) {
   if (!value || typeof value !== 'object') return ids;
 
@@ -76,19 +62,6 @@ function collectClientItemIds(value, ids = new Set()) {
     collectClientItemIds(item, ids);
   });
   return ids;
-}
-
-async function removePendingClipIds(clientItemIds) {
-  const ids = new Set(clientItemIds.filter(Boolean));
-  if (ids.size === 0) return;
-
-  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
-  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
-  await storageSet({
-    [STORAGE_KEYS.pendingClips]: pendingClips.filter(
-      (clip) => !ids.has(clip.clientItemId)
-    ),
-  });
 }
 
 export async function openLoginTab({ force = false } = {}) {
@@ -149,7 +122,7 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   let data = null;
 
   try {
-    response = await fetch(getApiEndpoint('extension/sync'), {
+    ({ response, data } = await requestJson(getApiEndpoint('extension/sync'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -159,9 +132,7 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
         extensionInstanceId,
         items: pendingClips.map(toExtensionSyncItem),
       }),
-    });
-
-    data = await parseResponseJson(response);
+    }));
   } catch (error) {
     console.warn('[extension-sync] network error; keeping clips queued', {
       clipCount: pendingClips.length,

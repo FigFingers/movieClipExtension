@@ -53,11 +53,11 @@ export function normalizePendingClips(value) {
 }
 
 export async function clearExtensionAuthState() {
-  await storageRemove([
-    STORAGE_KEYS.extensionAuthToken,
-    STORAGE_KEYS.extensionTokenExpiresAt,
-    // トークンを捨てる以上、旧トークンで積み上がったリフレッシュ抑制も持ち越さない。
-    STORAGE_KEYS.extensionTokenRefreshBackoff,
-  ]);
-  await storageSet({ [STORAGE_KEYS.extensionLinked]: false });
+  // 1回の書込みで認証全体を更新し、linkedだけが古い中間状態を公開しない。
+  await storageSet({
+    [STORAGE_KEYS.extensionAuthToken]: null,
+    [STORAGE_KEYS.extensionTokenExpiresAt]: null,
+    [STORAGE_KEYS.extensionTokenRefreshBackoff]: null,
+    [STORAGE_KEYS.extensionLinked]: false,
+  });
 }
