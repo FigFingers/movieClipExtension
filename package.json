@@ -8,7 +8,8 @@
     "lint": "biome lint .",
     "test": "node --test",
     "test:e2e": "npm run build && node --test --test-concurrency=1 e2e/*.spec.mjs",
-    "test:e2e:install": "playwright install --no-shell chromium"
+    "test:e2e:install": "playwright install --no-shell chromium",
+    "screenshots": "npm run build && node e2e/screenshots.mjs"
   },
   "keywords": [],
   "author": "",
