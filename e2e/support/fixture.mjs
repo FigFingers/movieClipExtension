@@ -120,11 +120,11 @@ export function mockTest(id, title, run) {
           });
           return { page, ...stored };
         },
-        async fault(status) {
+        async fault(status, options = {}) {
           const response = await fetch(`${origin}/__mock/api/faults`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ method: 'POST', path: '/api/extension/sync', status, times: 1 }),
+            body: JSON.stringify({ method: 'POST', path: '/api/extension/sync', status, ...options, times: 1 }),
           });
           assert.equal(response.ok, true);
         },

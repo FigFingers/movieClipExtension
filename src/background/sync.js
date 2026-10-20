@@ -176,29 +176,42 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   });
 
   if (response.status === 200) {
-    // フィールドが存在すればそれが権威的（空配列＝受理ゼロなので何も削除しない）。
-    // フィールド自体が無いレガシー応答のときだけ、従来どおり全送信分を削除する。
-    const hasAcceptedField = Array.isArray(data?.acceptedItemIds);
+    const attemptedIds = new Set(pendingClips.map((clip) => clip.clientItemId));
+    // 本文欠落・壊れたJSON・不正な受理IDを「旧形式の成功」と解釈すると録画を失う。
+    // 旧形式は明示的な ok: true とフィールド省略の場合だけ受け付ける。
+    const hasAcceptedField = data && Object.hasOwn(data, 'acceptedItemIds');
+    if (data?.ok !== true || (hasAcceptedField && (
+      !Array.isArray(data.acceptedItemIds) ||
+      !data.acceptedItemIds.every((id) => typeof id === 'string' && attemptedIds.has(id))
+    ))) {
+      console.warn('[extension-sync] invalid success response; keeping clips queued');
+      return { ok: false, queued: true, reason: 'invalid_response' };
+    }
+    // 空配列＝受理ゼロ。重複したIDは件数にも重複計上しない。
     const syncedItemIds = hasAcceptedField
-      ? data.acceptedItemIds
-      : pendingClips.map((clip) => clip.clientItemId);
+      ? Array.from(new Set(data.acceptedItemIds))
+      : Array.from(attemptedIds);
     await removePendingClipIds(syncedItemIds);
     await storageSet({ [STORAGE_KEYS.lastSyncAt]: new Date().toISOString() });
     return { ok: true, acceptedCount: syncedItemIds.length };
   }
 
   if (response.status === 400) {
-    const issueItemIds = Array.from(collectClientItemIds(data?.issues || data));
-    const dropItemIds = issueItemIds.length > 0
-      ? issueItemIds
-      : pendingClips.map((clip) => clip.clientItemId);
+    const attemptedIds = new Set(pendingClips.map((clip) => clip.clientItemId));
+    const dropItemIds = Array.from(collectClientItemIds(data?.issues || data))
+      .filter((id) => attemptedIds.has(id));
 
-    console.warn('[extension-sync] validation error; dropping attempted clips', {
+    // リクエスト全体の400から個別クリップの不正は断定できない。特定できた送信分だけ削除。
+    console.warn('[extension-sync] validation error; dropping identified invalid clips', {
       clipCount: dropItemIds.length,
       issues: data?.issues || data?.error || data?.message,
     });
     await removePendingClipIds(dropItemIds);
-    return { ok: false, queued: false, reason: 'validation_error' };
+    return {
+      ok: false,
+      queued: dropItemIds.length < attemptedIds.size,
+      reason: 'validation_error',
+    };
   }
 
   if (response.status === 401) {

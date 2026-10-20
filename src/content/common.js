@@ -180,26 +180,41 @@ export function openMemoSidebar({
 
   // 二重送信防止（Enter リピート・保存連打・Enter/click 競合）。
   let submitting = false;
-  const submit = () => {
-    if (submitting) return;
+  const submit = async () => {
+    if (submitting || closed || superseded) return;
     submitting = true;
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中…';
+    errorBox.hidden = true;
     const enriched = {
       ...data,
       clipName: nameInput.value.trim(),
     };
-    const result = onSave ? onSave(enriched) : sendData(enriched);
-    Promise.resolve(result)
-      .catch((error) => console.error('保存エラー:', error))
-      .finally(() => {
-        // 再オープンで置き換えられた旧セッションは、新しい入力中の再生状態に触れない。
-        if (
-          !superseded &&
-          (!activeMemoSession || activeMemoSession === session)
-        ) {
-          videoPlayer?.play?.();
-        }
-        closeSidebar();
-      });
+    try {
+      // ローカルキューに保存できれば完了。同期待ち（queued: true）は失敗ではない。
+      await (onSave ? onSave(enriched) : sendData(enriched));
+    } catch (error) {
+      console.error('保存エラー:', error);
+      if (!closed && !superseded && activeMemoSession === session) {
+        errorBox.textContent = '保存できませんでした。名前を保持しています。もう一度保存してください。';
+        errorBox.hidden = false;
+      }
+      return;
+    } finally {
+      submitting = false;
+      saveBtn.disabled = false;
+      saveBtn.textContent = '保存';
+    }
+
+    // 閉じた、または置き換えられたパネルの保存完了は現在の再生状態に触れない。
+    if (closed || superseded || activeMemoSession !== session) return;
+    try {
+      // 再生の拒否で保存済みクリップを再送させない。
+      videoPlayer?.play?.()?.catch?.((error) => console.warn('再生再開エラー:', error));
+    } catch (error) {
+      console.warn('再生再開エラー:', error);
+    }
+    closeSidebar();
   };
 
   // パネル内キーはサイトへ渡さず入力欄で処理。Enter で保存（IME 変換確定・リピート除外）。
@@ -250,6 +265,12 @@ export function openMemoSidebar({
   saveBtn.style.cssText = 'background:#00c853;border:none;color:#fff;padding:6px;cursor:pointer;';
   saveBtn.onclick = submit;
   sb.appendChild(saveBtn);
+
+  const errorBox = document.createElement('div');
+  errorBox.role = 'alert';
+  errorBox.hidden = true;
+  errorBox.style.cssText = 'font-size:12px;color:#ffb4ab;';
+  sb.appendChild(errorBox);
 
   document.body.appendChild(sb);
 

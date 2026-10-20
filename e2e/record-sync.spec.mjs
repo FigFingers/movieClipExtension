@@ -80,6 +80,49 @@ mockTest('disney-time', 'Disney+: メディア時刻のずれを除いた作品�
   assertTimes(clip, recorded, 1.1);
 });
 
+for (const service of ['netflix', 'disney']) {
+  mockTest(`${service}-save-retry`, `${service}: ローカル保存に失敗しても名前と区間を保持して再試行できる`, async (f) => {
+    const page = await f.open(service, service === 'netflix' ? NETFLIX_ID : DISNEY_ID);
+    const recorded = await record(page, service);
+    const worker = await f.browser.getServiceWorker();
+    // content script の isolated world で、次のキュー書込みだけを失敗させる。
+    await worker.evaluate(async (url) => {
+      const [tab] = await chrome.tabs.query({ url });
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'ISOLATED',
+        func: () => {
+          const original = chrome.storage.local.set;
+          chrome.storage.local.set = (items, callback) => {
+            if (Object.hasOwn(items, 'pendingClips')) {
+              chrome.storage.local.set = original;
+              throw new Error('test: local storage write failed');
+            }
+            return original.call(chrome.storage.local, items, callback);
+          };
+        },
+      });
+    }, page.url());
+    const sidebar = page.locator('#nf-memo-sidebar');
+    await sidebar.locator('input').fill('失敗しても残る名前');
+    await sidebar.getByRole('button', { name: '保存', exact: true }).click();
+    await sidebar.getByRole('alert').waitFor();
+    assert.match(await sidebar.getByRole('alert').textContent(), /保存できませんでした/);
+    assert.equal(await sidebar.locator('input').inputValue(), '失敗しても残る名前');
+    assert.equal(await sidebar.getByRole('button', { name: '保存', exact: true }).isEnabled(), true);
+    const video = page.locator(service === 'disney' ? '#hivePlayer1' : 'video');
+    assert.equal(await video.evaluate((v) => v.paused), true);
+    assert.deepEqual(await f.pending(), []);
+
+    await save(page, '失敗しても残る名前');
+    const pending = await f.pending();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].clipName, '失敗しても残る名前');
+    assertTimes(pending[0], recorded, service === 'disney' ? 1.1 : 0.3);
+    await page.waitForFunction(() => !(document.querySelector('#hivePlayer1') || document.querySelector('video')).paused);
+  });
+}
+
 mockTest('link-and-sync', 'サイト連携: 未連携で保存したクリップを連携直後に一度だけ同期する', async (f) => {
   const page = await f.open();
   const recorded = await record(page);
@@ -137,3 +180,25 @@ mockTest('revoked-token', '同期エラー: 401 では連携トークンを破�
   assert.equal(Boolean(stored.extensionLinked), false);
   assert.equal(f.mock.store.state.clips.some((c) => c.name === pending[0].clipName), false);
 });
+
+for (const [id, status, options] of [
+  ['malformed-success', 200, { kind: 'malformed' }],
+  ['unidentified-validation', 400, {}],
+]) {
+  mockTest(id, `同期エラー: ${id}でもキューを保持し同じIDで再送できる`, async (f) => {
+    await f.link();
+    await f.fault(status, options);
+    const page = await f.open();
+    await record(page);
+    await save(page, '応答不明でも残すクリップ');
+    const pending = await f.pending();
+    assert.equal(pending.length, 1);
+    assert.equal(f.syncRequests().at(-1).status, status);
+    assert.equal(f.mock.store.state.clips.some((c) => c.name === pending[0].clipName), false);
+    await f.browser.fireAlarm('extension-sync-retry');
+    await waitFor('再送後のキュー消去', async () => (await f.pending()).length === 0);
+    assert.deepEqual(f.syncRequests().map((r) => r.status), [status, 200]);
+    assert.equal(f.syncRequests()[1].body.items[0].clientItemId, pending[0].clientItemId);
+    assert.equal(f.mock.store.state.clips.filter((c) => c.name === pending[0].clipName).length, 1);
+  });
+}
