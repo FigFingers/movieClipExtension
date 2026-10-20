@@ -51,3 +51,36 @@ export const API_URL = 'http://localhost:3000/api/';
 - 同期: 保存ボタン → `pendingClips`（chrome.storage.local）に enqueue → background が `POST /api/extension/sync`（Bearer）。失敗時は 15 分毎の alarm と SW 起動時に再送
 - トークン更新: background が 6 時間毎+SW 起動時に期限を確認し、残り 15 日未満で `POST /api/extension/token/refresh`（ローテーション）
 - 連携解除: サイト `/account` の「連携を解除」→ `POST /api/extension/unlink` → `EXTENSION_UNLINKED` postMessage で拡張がトークン破棄（取り逃しても次回同期の 401 で自己修復）
+
+## E2E テスト（配信サービス・サイトのモック）
+
+Node.js 24 を使用します。モックのソースは `e2e/mock/` に同梱しているため、このリポジトリだけで実行できます。
+初回はルートで依存パッケージと Playwright の Chromium を準備してください。
+
+```powershell
+npm.cmd ci
+npm.cmd run test:e2e:install
+npm.cmd run test:e2e
+```
+
+`test:e2e` は現在のソースをビルドしてから、拡張を読み込んだ Chromium を画面なしで起動します。
+モックは空きポートで起動し、配信サービスへのアクセスと `localhost:3000` の API をモックに振り分けます。
+本物の配信サービスへのログインや、サイトの開発サーバーの起動は不要です。
+
+ブラウザーを表示したい場合:
+
+```powershell
+$env:E2E_HEADED = '1'
+npm.cmd run test:e2e
+```
+
+検証するのは Netflix のシリーズ・映画の保存、保存のキャンセル、短すぎる区間の拒否と再録画、
+Disney+ の作品時刻による保存、未連携のキューから連携後の同期、500 後の alarm 再送、401 後の認証解除とキュー保持です。
+各テストでブラウザープロファイルとサーバーを作り直すため、普段使う拡張の保存データには触れません。
+
+失敗時には `out/e2e/run-*/<ケース名>/` にスクリーンショット、`trace.zip`、`diagnostics.json` を残します。
+トレースはルートで `npx playwright show-trace <trace.zip のパス>` を実行して確認できます。
+生成する 60 秒の WebM は `out/e2e/media/` にキャッシュします（`MOVIE_CLIPPER_MOCK_CACHE` が設定済みならその場所）。
+
+通常の `npm test` は単体テストのみを実行し、Chromium のインストールは不要です。
+CI では単体テストと E2E の両方を実行し、E2E 失敗時の診断ファイルを artifact に保存します。
