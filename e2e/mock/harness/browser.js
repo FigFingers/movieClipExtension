@@ -112,6 +112,8 @@ export function routeFakeServices(context, mockOrigin) {
  * @param {number} options.mockPort
  * @param {string} options.profileDir Chromium のプロファイル。消してから使う
  * @param {boolean} [options.headless]
+ * @param {boolean} [options.proxySiteApi] localhost:3000 の API もモックへ振り分ける
+ * @param {boolean} [options.extensionDebugging] 開発用ブラウザーで CDP による拡張の再読み込みを許可する
  * @param {{ width: number, height: number }} [options.viewport]
  */
 export async function launchExtensionBrowser({
@@ -120,6 +122,8 @@ export async function launchExtensionBrowser({
   mockPort,
   profileDir,
   headless = true,
+  proxySiteApi = true,
+  extensionDebugging = false,
   viewport = { width: 1280, height: 800 },
   slowMo,
 }) {
@@ -131,7 +135,8 @@ export async function launchExtensionBrowser({
     '--no-first-run',
     '--no-default-browser-check',
   ];
-  const proxied = mockPort !== 3000;
+  const proxied = proxySiteApi && mockPort !== 3000;
+  if (extensionDebugging) args.push('--enable-unsafe-extension-debugging');
   if (proxied) {
     args.push(`--proxy-server=http://127.0.0.1:${mockPort}`, '--proxy-bypass-list=<-loopback>');
   }

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "dev": "webpack --watch",
+    "dev": "node dev.mjs",
     "build": "webpack --config webpack.config.js",
     "lint": "biome lint .",
     "test": "node --test",

@@ -191,6 +191,7 @@ export function createMockServer({ port = 3000, host = '127.0.0.1', catalog, see
   // プロキシとしての CONNECT（https）は外へ出さない。擬似サービスの https はハーネスの route が返す。
   // ただし、カタログで https の動画を指定した作品の配信元へは中継する（ブラウザーが動画を直接取りに行くため）。
   server.on('connect', (req, socket, head) => {
+    socket.on('error', () => {});
     const [hostname, portText = '443'] = String(req.url || '').split(':');
     const allowed = Object.values(mockStore.state.catalog).some((service) => service.titles.some((title) =>
       title.video?.kind === 'url' && new URL(title.video.url).hostname === hostname));
