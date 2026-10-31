@@ -135,6 +135,7 @@ export async function launchExtensionBrowser({
     '--no-first-run',
     '--no-default-browser-check',
   ];
+  // manifest.json の host_permissions と content_scripts がサイトを localhost:3000 に固定しているため、3000 番以外で動くモックへはプロキシで回す。
   const proxied = proxySiteApi && mockPort !== 3000;
   if (extensionDebugging) args.push('--enable-unsafe-extension-debugging');
   if (proxied) {

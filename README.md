@@ -14,7 +14,8 @@ npm install
 
 ```bash
 npm run build   # 一回ビルド
-npm run dev     # webpack --watch
+npm run watch   # webpack --watch（普段の Chrome で開発するとき）
+npm run dev     # webpack の watch とモック・専用 Chromium を起動（「E2E テスト」の節を参照）
 ```
 
 `manifest.json` は `dist/` のバンドル（`background.js` / `content.js` / `content_disney.js` / `extension_link.js`）を参照するため、**ビルドせずに読み込むと拡張は動作しない**（`dist/` は git 管理外）。

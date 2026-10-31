@@ -4,6 +4,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "node dev.mjs",
+    "watch": "webpack --watch",
     "build": "webpack --config webpack.config.js",
     "lint": "biome lint .",
     "test": "node --test",
