@@ -1,4 +1,5 @@
 import { getApiEndpoint } from './../api.js';
+import { requestJson } from './request.js';
 import {
   STORAGE_KEYS,
   storageGet,
@@ -6,7 +7,7 @@ import {
   storageRemove,
   clearExtensionAuthState,
 } from './../shared/storage.js';
-import { runExclusive } from './sync.js';
+import { runAuthExclusive as runExclusive } from './exclusive.js';
 
 // トークンはサーバ発行の不透明トークン(JWT ではない)。期限はサーバが link/refresh 応答の
 // expiresAt で通知し、拡張は storage に保存した値だけを見て更新時期を判断する。
@@ -27,10 +28,8 @@ function computeBackoffMs(failureCount, status) {
 }
 
 // バックオフは「どのトークンで失敗したか」に紐づけて保存する。
-// content 側の saveExtensionAuthToken() は runExclusive の外で storage を書き換えるため、
-// 「保存済みトークンを確認してから書く」形にしても確認と書き込みの間に再連携が割り込む
-// 余地が残る(TOCTOU)。書き込み側の原子性に頼らず、読み出し側で現在のトークンと照合し、
-// 一致しない記録は無効として扱う。これなら古い試行が後から書き戻しても影響しない。
+// 認証更新はbackgroundで直列化する。旧バージョンの記録もトークンと照合し、
+// 一致しないバックオフを持ち越さない。
 async function tokenFingerprint(token) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest).slice(0, 8))
@@ -119,15 +118,14 @@ async function performCheckAndRefreshToken() {
   let data = null;
 
   try {
-    response = await fetch(getApiEndpoint('extension/token/refresh'), {
+    ({ response, data } = await requestJson(getApiEndpoint('extension/token/refresh'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ extensionInstanceId }),
-    });
-    data = await response.json().catch(() => null);
+    }));
   } catch (error) {
     console.warn('[extension-sync] token refresh failed; keeping current token', {
       message: error?.message,

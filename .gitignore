@@ -12,6 +12,7 @@
 
 # testing
 /coverage
+/e2e/mock/.cache
 
 # next.js
 /.next/

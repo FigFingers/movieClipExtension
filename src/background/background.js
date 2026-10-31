@@ -1,3 +1,5 @@
+import { getOrCreateInstanceId } from './authState.js';
+import { handleStateMessage } from './stateMessages.js';
 import {
   fetchClipComments,
   postClipComment,
@@ -171,49 +173,6 @@ chrome.runtime.onInstalled.addListener((details) => {
   void handleInstalledDemo(details);
 });
 
-function readOrCreateInstanceId() {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get('extensionInstanceId', (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-
-      if (result.extensionInstanceId) {
-        resolve(result.extensionInstanceId);
-        return;
-      }
-
-      // 初回リンク時は生成した ID の永続化を待ってから解決する。
-      // 先に応答すると、ページがトークンを往復させた際に saveExtensionAuthToken() 側の
-      // getOrCreateExtensionInstanceId() が書き込み前の storage を読んで別 ID を生成し、
-      // instanceId 不一致でトークンが拒否される競合が起きるため。
-      const extensionInstanceId = crypto.randomUUID();
-      chrome.storage.local.set({ extensionInstanceId }, () => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve(extensionInstanceId);
-      });
-    });
-  });
-}
-
-// instanceId 生成を 1 経路に直列化する。port 接続(GET_EXTENSION_INSTANCE_ID)と
-// content script からの auth-status 経路が空 storage に同時アクセスしても、同一の
-// in-flight Promise を共有して同じ ID に解決させ、二重生成による不一致を防ぐ。
-let instanceIdPromise = null;
-function getOrCreateInstanceId() {
-  if (!instanceIdPromise) {
-    instanceIdPromise = readOrCreateInstanceId().catch((error) => {
-      instanceIdPromise = null; // 失敗時は次回再試行できるようリセット
-      throw error;
-    });
-  }
-  return instanceIdPromise;
-}
-
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'extensionInstanceId') return;
 
@@ -226,13 +185,8 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // content script はこのメッセージ経由で ID を取得し、自前生成せず background に一本化する。
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== 'GET_OR_CREATE_INSTANCE_ID') return;
-
-  getOrCreateInstanceId()
-    .then((extensionInstanceId) => sendResponse({ ok: true, extensionInstanceId }))
-    .catch((error) => sendResponse({ ok: false, message: error?.message }));
-
-  return true; // 非同期応答
+  const result = handleStateMessage(message, sender);
+  if (result) return respondToAsyncRequest(result, sendResponse, 'state_update_failed');
 });
 
 // Netflix プレイヤーへのシーク（content script から {type:"seek", sec} を受け取る）

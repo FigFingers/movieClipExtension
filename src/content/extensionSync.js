@@ -1,10 +1,9 @@
+import { toExtensionClipPayload } from '../shared/clipPayload.js';
+import { sendRuntimeMessage } from '../shared/runtime.js';
 import {
   STORAGE_KEYS,
   storageGet,
-  storageSet,
-  storageRemove,
   normalizePendingClips,
-  clearExtensionAuthState,
 } from './../shared/storage.js';
 
 // このモジュールは content script 専用。サイト API への fetch(同期・トークンリフレッシュ)は
@@ -13,47 +12,8 @@ import {
 
 export { STORAGE_KEYS };
 
-function createUuid() {
-  return crypto.randomUUID();
-}
 
-function firstPresent(...values) {
-  return values.find((value) => value !== undefined && value !== null && value !== '');
-}
-
-function nullableString(value) {
-  if (value === undefined || value === null) return null;
-  const text = String(value).trim();
-  return text || null;
-}
-
-function normalizeNumber(value, fieldName) {
-  const numberValue = Number(value);
-  if (!Number.isFinite(numberValue)) {
-    throw new Error(`Invalid clip ${fieldName}: ${value}`);
-  }
-  return numberValue;
-}
-
-function normalizeUrl(value) {
-  const rawUrl = firstPresent(value, location.href);
-  if (!rawUrl) {
-    throw new Error('Clip url is required');
-  }
-  return new URL(String(rawUrl), location.origin).href;
-}
-
-function sendRuntimeMessage(message) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(response);
-    });
-  });
-}
+export { toExtensionClipPayload };
 
 export async function getOrCreateExtensionInstanceId() {
   const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
@@ -97,66 +57,17 @@ export async function getExtensionConnectionState() {
 }
 
 export async function saveExtensionAuthToken(extensionInstanceId, extensionAuthToken, expiresAt) {
-  const currentInstanceId = await getOrCreateExtensionInstanceId();
-  if (extensionInstanceId !== currentInstanceId) {
-    console.warn('[extension-sync] ignored auth token for mismatched extensionInstanceId', {
-      expected: currentInstanceId,
-      received: extensionInstanceId,
-    });
-    return false;
-  }
-
-  if (!extensionAuthToken || typeof extensionAuthToken !== 'string') {
-    console.warn('[extension-sync] ignored empty auth token');
-    return false;
-  }
-
-  // expiresAt はサーバ発行の ISO 文字列。欠落時(旧サイト)でもトークン自体は保存し、
-  // background のリフレッシュが期限付きトークンへ移行させる。
-  const expiresAtMs = Date.parse(expiresAt || '');
-  await storageSet({
-    [STORAGE_KEYS.extensionAuthToken]: extensionAuthToken,
-    [STORAGE_KEYS.extensionTokenExpiresAt]: Number.isFinite(expiresAtMs)
-      ? new Date(expiresAtMs).toISOString()
-      : null,
-    [STORAGE_KEYS.extensionLinked]: true,
+  const response = await sendRuntimeMessage({
+    type: 'SAVE_EXTENSION_AUTH_TOKEN', extensionInstanceId, extensionAuthToken, expiresAt,
   });
-  // 新しいトークンを受けた時点で旧トークン時代の失敗回数は無効。抑制を持ち越すと
-  // 再連携直後のリフレッシュが不要に待たされる。
-  await storageRemove([STORAGE_KEYS.extensionTokenRefreshBackoff]);
-  return true;
-}
-
-export function toExtensionClipPayload(clip) {
-  const startTimeValue = firstPresent(clip?.startTime, clip?.StartTime);
-  const endTimeValue = firstPresent(clip?.endTime, clip?.EndTime);
-  const clientItemId = firstPresent(clip?.clientItemId, clip?.localClientItemId) || createUuid();
-
-  return {
-    clientItemId: String(clientItemId),
-    title: nullableString(clip?.title),
-    url: normalizeUrl(firstPresent(clip?.url, clip?.URL)),
-    startTime: normalizeNumber(startTimeValue, 'startTime'),
-    endTime: normalizeNumber(endTimeValue, 'endTime'),
-    service: nullableString(clip?.service),
-    clipName: nullableString(clip?.clipName),
-    epnumber: nullableString(clip?.epnumber),
-    createdAt: clip?.createdAt || new Date().toISOString(),
-  };
+  return response.ok === true;
 }
 
 export async function enqueueClip(clip) {
-  const normalizedClip = toExtensionClipPayload(clip);
-  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
-  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
-  const queueById = new Map(pendingClips.map((item) => [item.clientItemId, item]));
-  queueById.set(normalizedClip.clientItemId, normalizedClip);
-
-  await storageSet({
-    [STORAGE_KEYS.pendingClips]: Array.from(queueById.values()),
-  });
-
-  return normalizedClip;
+  const normalized = toExtensionClipPayload(clip, { pageUrl: globalThis.location?.href });
+  const response = await sendRuntimeMessage({ type: 'ENQUEUE_CLIP', clip: normalized });
+  if (!response?.ok || !response.clip) throw new Error(response?.message || 'Failed to save clip');
+  return response.clip;
 }
 
 export async function syncPendingQueue(options = {}) {
@@ -202,18 +113,6 @@ export async function handleExtensionLinkWithAuthToken(message) {
   return { ok: saved };
 }
 
-export async function handleExtensionUnlinked(message) {
-  // 未連携時に unlink を受けても instanceId を新規発行しないよう、保存済みの値だけ読む。
-  const currentInstanceId = await getExtensionInstanceId();
-  if (!currentInstanceId || message?.extensionInstanceId !== currentInstanceId) {
-    console.warn('[extension-sync] ignored unlink for mismatched extensionInstanceId', {
-      expected: currentInstanceId,
-      received: message?.extensionInstanceId,
-    });
-    return { ok: false };
-  }
-
-  await clearExtensionAuthState();
-  console.log('[extension-sync] cleared auth state after unlink');
-  return { ok: true };
+export function handleExtensionUnlinked(message) {
+  return sendRuntimeMessage({ type: 'UNLINK_EXTENSION', extensionInstanceId: message?.extensionInstanceId });
 }

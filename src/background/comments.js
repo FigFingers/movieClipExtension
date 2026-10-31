@@ -1,10 +1,11 @@
 import { getApiEndpoint } from './../api.js';
+import { requestJson } from './request.js';
 import {
   STORAGE_KEYS,
   clearExtensionAuthState,
   storageGet,
 } from './../shared/storage.js';
-import { runExclusive } from './sync.js';
+import { runAuthExclusive as runExclusive } from './exclusive.js';
 
 const DEFAULT_COMMENT_LIMIT = 20;
 const MAX_COMMENT_LIMIT = 100;
@@ -102,10 +103,6 @@ export function buildCommentsApiUrl({ clipId, cursor, limit }, extensionInstance
   return url.toString();
 }
 
-function parseResponseJson(response) {
-  return response.json().catch(() => null);
-}
-
 function copyServerErrorDetails(result, data) {
   if (typeof data?.message === 'string') {
     result.message = data.message;
@@ -154,8 +151,9 @@ async function requestCommentsApi({ method, value }) {
   }
 
   let response;
+  let data;
   try {
-    response = await fetch(url, options);
+    ({ response, data } = await requestJson(url, options));
   } catch (error) {
     console.warn('[extension-comments] network error', {
       method,
@@ -164,7 +162,6 @@ async function requestCommentsApi({ method, value }) {
     return { ok: false, reason: 'network_error' };
   }
 
-  const data = await parseResponseJson(response);
   const reason = getCommentsResponseReason(response.status);
 
   if (reason === null) {

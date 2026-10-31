@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-const commonSourceUrl = new URL('../../src/content/common.js', import.meta.url);
 let moduleSequence = 0;
 
 class FakeEventTarget {
@@ -124,28 +122,17 @@ function createKeyboardEvent(target) {
 
 function createDeferred() {
   let resolve;
-  const promise = new Promise((done) => {
+  let reject;
+  const promise = new Promise((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function loadCommonModule() {
-  const source = await readFile(commonSourceUrl, 'utf8');
-  const importPattern =
-    /import\s*\{[\s\S]*?\}\s*from '\.\/extensionSync\.js';/;
-  const testableSource = source.replace(
-    importPattern,
-    'const enqueueClip = async () => ({ clientItemId: "test" });\n' +
-      'const syncPendingQueue = async () => ({ ok: true });',
-  );
-  assert.notEqual(testableSource, source, 'extensionSync import should be replaced');
-
   moduleSequence += 1;
-  const encoded = Buffer.from(
-    `${testableSource}\n//# sourceURL=common-test-${moduleSequence}.mjs`,
-  ).toString('base64');
-  return import(`data:text/javascript;base64,${encoded}`);
+  return import(new URL(`../../src/content/memoSidebar.js?case=${moduleSequence}`, import.meta.url));
 }
 
 function installDom() {
@@ -253,4 +240,133 @@ test('Enter submits only from the name input', async () => {
 
   assert.equal(saveCount, 1);
   assert.equal(inputEnter.defaultPrevented, true);
+});
+
+for (const synchronous of [false, true]) {
+  test(`a ${synchronous ? 'synchronous' : 'rejected'} save failure preserves the draft and allows retry`, async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { document } = installDom();
+    const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+    const player = document.createElement('video');
+    player.style.width = '75%';
+    let playCount = 0;
+    player.play = () => { playCount += 1; };
+    const attempts = [];
+    const sidebar = openMemoSidebar({
+      videoPlayer: player,
+      data: { StartTime: 10, EndTime: 20 },
+      onSave: (data) => {
+        attempts.push(data);
+        if (attempts.length > 1) return { queued: true };
+        if (synchronous) throw new Error('storage unavailable');
+        return Promise.reject(new Error('storage unavailable'));
+      },
+    });
+    const { nameInput, saveButton } = sidebarControls(sidebar);
+    nameInput.value = '  再試行する名前  ';
+    assert.doesNotThrow(() => saveButton.onclick());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(document.getElementById(MEMO_SIDEBAR_ID), sidebar);
+    assert.equal(nameInput.value, '  再試行する名前  ');
+    assert.equal(player.style.width, 'calc(100% - 20%)');
+    assert.equal(playCount, 0);
+    assert.equal(saveButton.disabled, false);
+    const error = sidebar.children.find((child) => child.role === 'alert');
+    assert.equal(error.hidden, false);
+    assert.match(error.textContent, /保存できませんでした/);
+
+    saveButton.onclick();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts[0], attempts[1]);
+    assert.equal(attempts[1].clipName, '再試行する名前');
+    assert.equal(document.getElementById(MEMO_SIDEBAR_ID), null);
+    assert.equal(player.style.width, '75%');
+    assert.equal(playCount, 1);
+  });
+}
+
+test('repeated clicks and Enter submit once while saving', async () => {
+  const { document, window } = installDom();
+  const { openMemoSidebar } = await loadCommonModule();
+  const pending = createDeferred();
+  const player = document.createElement('video');
+  let saveCount = 0;
+  const sidebar = openMemoSidebar({
+    videoPlayer: player,
+    onSave: () => { saveCount += 1; return pending.promise; },
+  });
+  const { nameInput, saveButton } = sidebarControls(sidebar);
+  saveButton.onclick();
+  saveButton.onclick();
+  window.dispatch(createKeyboardEvent(nameInput));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(saveCount, 1);
+  assert.equal(saveButton.disabled, true);
+  pending.resolve({ ok: false, queued: true, syncResult: { reason: 'missing_token' } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sidebar.parentElement, null, 'a queued clip is saved even if remote sync is pending');
+});
+
+test('a late save failure does not alter a reopened sidebar', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const { document } = installDom();
+  const { MEMO_SIDEBAR_ID, openMemoSidebar } = await loadCommonModule();
+  const pending = createDeferred();
+  const player = document.createElement('video');
+  const oldSidebar = openMemoSidebar({ videoPlayer: player, onSave: () => pending.promise });
+  sidebarControls(oldSidebar).saveButton.onclick();
+  const sidebar = openMemoSidebar({ videoPlayer: player });
+  sidebarControls(sidebar).nameInput.value = '新しい入力';
+  pending.reject(new Error('late storage failure'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(document.getElementById(MEMO_SIDEBAR_ID), sidebar);
+  assert.equal(sidebarControls(sidebar).nameInput.value, '新しい入力');
+  assert.equal(player.style.width, 'calc(100% - 20%)');
+  assert.equal(document.activeElement, sidebarControls(sidebar).nameInput);
+  sidebarControls(sidebar).closeButton.onclick();
+});
+
+test('closing during a save prevents a late completion from resuming playback', async () => {
+  const { document } = installDom();
+  const { openMemoSidebar } = await loadCommonModule();
+  const pending = createDeferred();
+  const player = document.createElement('video');
+  let playCount = 0;
+  let closeCount = 0;
+  player.play = () => { playCount += 1; };
+  const sidebar = openMemoSidebar({
+    videoPlayer: player,
+    onSave: () => pending.promise,
+    onClose: () => { closeCount += 1; },
+  });
+  const controls = sidebarControls(sidebar);
+  controls.saveButton.onclick();
+  controls.closeButton.onclick();
+  pending.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(playCount, 0);
+  assert.equal(closeCount, 1);
+});
+
+test('the public facade keeps one client ID and creation time across save retries', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const { document } = installDom();
+  const { openMemoSidebar } = await import('../../src/content/common.js');
+  const attempts = [];
+  const sidebar = openMemoSidebar({
+    videoPlayer: document.createElement('video'),
+    data: { StartTime: 10, EndTime: 20 },
+    onSave: (data) => {
+      attempts.push(data);
+      if (attempts.length === 1) throw new Error('try again');
+    },
+  });
+  const controls = sidebarControls(sidebar);
+  await controls.saveButton.onclick();
+  await controls.saveButton.onclick();
+  assert.ok(attempts[0].clientItemId);
+  assert.equal(attempts[0].clientItemId, attempts[1].clientItemId);
+  assert.equal(attempts[0].createdAt, attempts[1].createdAt);
 });

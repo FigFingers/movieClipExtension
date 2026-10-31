@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["src/**/*.js", "*.json", "webpack.config.js"]
+    "includes": ["src/**/*.js", "e2e/**/*.js", "e2e/**/*.mjs", "*.json", "webpack.config.js"]
   },
   "formatter": {
     "enabled": false
