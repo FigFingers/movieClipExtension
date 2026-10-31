@@ -2,7 +2,8 @@ import {
   clearAutoNavigation,
   detectService,
   EXT_UI_CLASS,
-  isAutoNavigation,
+  formatSeconds,
+  handleOwnedPlaybackRouteChange,
   markAutoNavigation,
   markExtUi,
   openMemoSidebar,
@@ -12,83 +13,106 @@ import {
 } from './common.js';
 import {
   COMMENT_PANEL_ID,
+  closeCommentPanel,
   isCommentPanelOpen,
   toggleCommentPanel
 } from './commentPanel.js';
+import {
+  clearPlaybackContext,
+  ensurePlaybackContext,
+  setPlaybackContext
+} from './playbackContext.js';
+import { setTextContentIfChanged } from './domUpdates.js';
+import { normalizePlaybackRoute } from '../shared/playbackBridgeValidation.js';
+import {
+  addPlaybackOwnerToUrl,
+  claimPlaybackOwnership,
+  getTabPlaybackOwnerNonce,
+  preparePlaybackNavigation,
+  releasePlaybackOwnership,
+  updatePlaybackOwnership
+} from './playbackOwnership.js';
 
 (() => {
-  const AUTO_NAV_STORAGE_KEY = 'autoNav';
-  const AUTO_NAV_TTL_MS = 15000;
-  let autoNavCache = null;
+  ensurePlaybackContext();
+  clearAutoNavigation();
+  let activePlaybackOwnerNonce = null;
+  let playbackLocation = null;
 
-  function isAutoNavValid(autoNav) {
-    if (!autoNav || typeof autoNav !== 'object') return false;
-    const ts = Number(autoNav.ts);
-    if (!Number.isFinite(ts)) return false;
-    return Date.now() - ts <= AUTO_NAV_TTL_MS;
+  function routeIdentity(url) {
+    return normalizePlaybackRoute(url, location.href) || String(url || '');
   }
 
-  function isAutoNavActive() {
-    return isAutoNavValid(autoNavCache);
+  function applyPlaybackContext(context, ownerNonce) {
+    setPlaybackContext(context);
+    activePlaybackOwnerNonce = ownerNonce;
+    playbackLocation = routeIdentity(location.href);
   }
 
-  async function loadAutoNav() {
-    const { [AUTO_NAV_STORAGE_KEY]: autoNav } = await chrome.storage.local.get([
-      AUTO_NAV_STORAGE_KEY
-    ]);
-
-    if (!isAutoNavValid(autoNav)) {
-      if (autoNav) {
-        await chrome.storage.local.remove(AUTO_NAV_STORAGE_KEY);
-        clearAutoNavigation();
+  async function claimPlaybackSession(ownerNonce) {
+    try {
+      const claim = await claimPlaybackOwnership({ nonce: ownerNonce });
+      if (
+        !claim?.ok ||
+        typeof claim.nonce !== 'string' ||
+        claim.nonce.length < 8
+      ) {
+        throw new Error(claim?.reason || 'Playback claim failed');
       }
-      autoNavCache = null;
+      applyPlaybackContext(claim.context, claim.nonce);
+      return claim;
+    } catch {
+      clearPlaybackContext();
       return null;
     }
-
-    autoNavCache = autoNav;
-    return autoNav;
   }
 
-  async function clearAutoNavState() {
-    autoNavCache = null;
+  async function transitionPlaybackSession(mode, clip, patch) {
+    const clipId = clip?.clipId ?? clip?.id;
+    const update = await updatePlaybackOwnership({
+      nonce: activePlaybackOwnerNonce,
+      mode,
+      clipId,
+      patch
+    });
+    if (!update?.ok) {
+      deactivatePlaybackContext();
+      return null;
+    }
+    applyPlaybackContext(update.context, activePlaybackOwnerNonce);
+    return update;
+  }
+
+  function deactivatePlaybackContext() {
+    const ownerNonce = activePlaybackOwnerNonce;
+    activePlaybackOwnerNonce = null;
+    playbackLocation = null;
     clearAutoNavigation();
-    await chrome.storage.local.remove(AUTO_NAV_STORAGE_KEY);
+    clearPlaybackContext();
+    closeCommentPanel();
+    releasePlaybackOwnership(ownerNonce);
+    Mode.stop();
   }
 
   async function beginAutoNavigation({ mode, nextUrl, nextOrder, nextId }) {
-    const autoNav = {
-      ts: Date.now(),
-      mode,
-      nextUrl,
-      nextOrder,
-      nextId
-    };
-
-    autoNavCache = autoNav;
-    markAutoNavigation(mode || 'auto');
-
-    const update = { [AUTO_NAV_STORAGE_KEY]: autoNav };
-
-    if (mode === 'playlist') {
-      update.playClipSystemKey = 0;
-      update.playlistSystemKey = 1;
-      update.playmode = 'playlist';
-    } else if (mode === 'clip') {
-      update.playClipSystemKey = 1;
-      update.playlistSystemKey = 0;
-      update.playmode = 'clip';
+    const prepared = await preparePlaybackNavigation(
+      activePlaybackOwnerNonce,
+      nextUrl
+    );
+    if (!prepared?.ok) {
+      deactivatePlaybackContext();
+      return false;
     }
-
-    if (Number.isFinite(nextOrder)) {
-      update.currentClipOrder = nextOrder;
+    const marked = markAutoNavigation({
+      ownerNonce: activePlaybackOwnerNonce,
+      expectedRoute: routeIdentity(nextUrl),
+      reason: `${mode}:${nextOrder ?? ''}:${nextId ?? ''}`,
+    });
+    if (!marked) {
+      deactivatePlaybackContext();
+      return false;
     }
-
-    if (nextId !== undefined) {
-      update.currentClipId = nextId;
-    }
-
-    await chrome.storage.local.set(update);
+    return true;
   }
 
   // === Disney+ DOM ヘルパー（Shadow DOM 対応） ===
@@ -146,11 +170,10 @@ import {
       right: 'dext-control-host-right'
     };
     const STYLE_ID = 'dext-control-style';
-    const HISTORY_HOOK_FLAG = '__dext_history_hooked__';
 
     const BUTTONS = [
-      { id: 'dext-left-button', area: 'left', label: 'Left Button', action: myCustomActionLeft },
-      { id: 'dext-right-button-1', area: 'right', label: 'Right Button 1', action: myCustomActionRight1 },
+      { id: 'dext-left-button', area: 'left', label: '録画', action: myCustomActionLeft },
+      { id: 'dext-right-button-1', area: 'right', label: 'ループ', action: myCustomActionRight1 },
       {
         id: 'dext-right-button-2',
         area: 'right',
@@ -314,7 +337,7 @@ import {
       let container = document.getElementById(config.id);
 
       if (!container || !host.contains(container)) {
-        if (container && container.parentNode) container.parentNode.removeChild(container);
+        if (container?.parentNode) container.parentNode.removeChild(container);
 
         // Disney+ に寄せた構造: [div.button-container(tabindex=0, role="button")] ＞ [button.control] ＋ [span.label]
         container = document.createElement('div');
@@ -373,9 +396,7 @@ import {
       }
 
       const label = container.querySelector('.dext-button-label');
-      if (label) {
-        label.textContent = config.label;
-      }
+      setTextContentIfChanged(label, config.label);
       container.setAttribute('aria-label', config.label);
       if (config.controls) {
         const panelOpen = isCommentPanelOpen();
@@ -413,7 +434,6 @@ import {
 
         const payload = {
           clipName: clipName,
-          user: "testUser",
           service: detectService(),
           StartTime: starttime,   // Netflix 形式に合わせる
           EndTime: endtime,       // Netflix 形式に合わせる
@@ -504,31 +524,6 @@ import {
       attach();
     }
 
-    function hookHistory() {
-      if (window[HISTORY_HOOK_FLAG]) {
-        return;
-      }
-
-      window[HISTORY_HOOK_FLAG] = true;
-
-      const dispatch = () => window.dispatchEvent(new Event('locationchange'));
-
-      for (const type of ['pushState', 'replaceState']) {
-        const original = history[type];
-        if (typeof original !== 'function') {
-          continue;
-        }
-
-        history[type] = function historyPatched() {
-          const result = original.apply(this, arguments);
-          dispatch();
-          return result;
-        };
-      }
-
-      window.addEventListener('popstate', dispatch);
-    }
-
     // Disney+ はマウス静止でネイティブのコントロール行が自動的に消える。拡張ボタンも
     // それに追随させ、(1) 一定時間ポインタ操作が無いアイドル時 (2) ウィンドウが blur した
     // ときに隠す。停止中はネイティブ同様に出したままにする。表示制御は共通の EXT_UI_CLASS
@@ -549,6 +544,10 @@ import {
       ensurePlayerIdleStyle();
       const root = document.documentElement;
       let idleTimer = null;
+      // 起動直後やタブ復帰直後は、ユーザーがまだページをクリックしていないと
+      // document.hasFocus() が false を返すことがある。可視タブはひとまずアクティブとし、
+      // 以降は focus / blur / visibilitychange で状態を追跡する。
+      let pageActive = !document.hidden;
 
       const setIdle = (v) => root.classList.toggle(PLAYER_IDLE_CLASS, v);
       const goIdle = () => {
@@ -564,23 +563,50 @@ import {
         idleTimer = isPlaying() ? setTimeout(goIdle, PLAYER_IDLE_MS) : null;
       };
       // blur / 非表示中は play・pause など操作以外のイベントで復帰させない。
-      const markActive = () => (document.hasFocus() ? activate() : goIdle());
+      const markActive = () => (pageActive ? activate() : goIdle());
+      // 表示中のプレイヤー上にカーソルが戻った時点で、クリックを待たずに復帰する。
+      const handleUserActivity = () => {
+        pageActive = !document.hidden;
+        markActive();
+      };
+      const handleBlur = () => {
+        pageActive = false;
+        goIdle();
+      };
+      const handleFocus = () => {
+        pageActive = true;
+        activate();
+      };
+      const handleVisibilityChange = () => {
+        pageActive = !document.hidden;
+        if (pageActive) {
+          activate();
+        } else {
+          goIdle();
+        }
+      };
 
-      for (const type of ['pointermove', 'pointerdown', 'keydown']) {
-        document.addEventListener(type, markActive, { passive: true });
+      // Disney+ のマスクや Shadow DOM 内でイベント伝播が止められても拾えるよう、
+      // window のキャプチャ段階で監視する。
+      for (const type of ['pointerover', 'pointermove', 'pointerdown', 'keydown']) {
+        window.addEventListener(type, handleUserActivity, {
+          capture: true,
+          passive: true,
+        });
       }
       // ウィンドウが非アクティブになったら即座に隠す / 戻ったら復帰。
-      window.addEventListener('blur', goIdle);
-      window.addEventListener('focus', activate);
+      window.addEventListener('blur', handleBlur);
+      window.addEventListener('focus', handleFocus);
+      // タブ切り替えでは window.focus が発火しない場合があるため、可視性でも復帰させる。
+      document.addEventListener('visibilitychange', handleVisibilityChange);
       // 再生/停止（media イベントは bubble しないため capture で拾う）。
       document.addEventListener('play', markActive, true);
       document.addEventListener('pause', markActive, true);
 
-      markActive();
+      handleVisibilityChange();
     }
 
     function bootstrap() {
-      hookHistory();
       startObserver();
       scheduleInjection();
       startTabVisibilityToggle();
@@ -597,16 +623,6 @@ import {
   const Service = (() => {
     const DPlusTime = (() => {
 
-      function formatTime(sec) {
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = sec % 60;
-
-        return h > 0
-          ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
-          : `${m}:${String(s).padStart(2, "0")}`;
-      }
-
       function getTime() {
         // aria-valuenow/valuemax（秒）は .progress-bar__seekable-range 側に付く。
         const slider = getProgressSlider();
@@ -620,9 +636,9 @@ import {
         return {
           currentSeconds: current,
           totalSeconds  : total,
-          currentTime   : formatTime(current),
-          totalTime     : formatTime(total),
-          progress      : ((current / total) * 100).toFixed(2) + "%"
+          currentTime   : formatSeconds(current),
+          totalTime     : formatSeconds(total),
+          progress      : `${((current / total) * 100).toFixed(2)}%`
         };
       }
 
@@ -890,14 +906,12 @@ import {
   const Mode = (() => {
     let stopCurrent = null;
     let loopEnabled = false; // loop state
+    let currentSession = null;
 
-    async function loadClipData() {
-      const { playClipSystemKey, clip } = await chrome.storage.local.get([
-        'playClipSystemKey',
-        'clip'
-      ]);
-
-      if (playClipSystemKey !== 1 || !clip) {
+    function loadClipData(session = currentSession) {
+      const snapshot = session?.snapshot;
+      const clip = snapshot?.clip;
+      if (session?.context?.mode !== 'clip' || snapshot?.playClipSystemKey !== 1 || !clip) {
         console.log('[Clip] No clip data or disabled');
         return null;
       }
@@ -905,29 +919,29 @@ import {
       return {
         startTime: Number(clip.startTime ?? clip.starttime),
         endTime:   Number(clip.endTime   ?? clip.endtime),
-        title:     String(clip.title || '')
+        title:     String(clip.title || ''),
+        clipId:    clip.clipId ?? clip.id
       };
     }
 
-    async function startClipMode() {
-      const clipData = await loadClipData();
+    async function startClipMode(session) {
+      currentSession = session;
+      const clipData = loadClipData(session);
       if (!clipData) return;
-
-      await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0, playmode: "clip" });
-      stopCurrent = Playlist.play([clipData], { loop: loopEnabled });
+      stopCurrent = Playlist.play([clipData], {
+        loop: loopEnabled,
+        onStart: clearAutoNavigation
+      });
     }
 
-async function startPlaylistMode() {
+async function startPlaylistMode(session) {
   stopActiveMode();
-
-  await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: "playlist" });
-
-  const { playQueue, currentClipOrder } = await chrome.storage.local.get([
-    'playQueue',
-    'currentClipOrder'
-  ]);
+  currentSession = session;
+  const { playQueue, currentClipOrder } = session?.snapshot || {};
+  if (session?.context?.mode !== 'playlist') return;
 
   if (!Array.isArray(playQueue) || playQueue.length === 0) {
+    clearPlaybackContext();
     console.warn('[Playlist] playQueue が存在しません');
     return;
   }
@@ -937,17 +951,13 @@ async function startPlaylistMode() {
 
   const order = Number.isInteger(currentClipOrder) ? currentClipOrder : fallbackOrder;
   const currentClip = sortedQueue.find((clip) => clip.order === order) || sortedQueue[0];
+  let activeOrder = currentClip?.order ?? order;
 
   if (!currentClip) {
+    clearPlaybackContext();
     console.warn('[Playlist] 該当clipが見つかりません:', order);
     return;
   }
-
-  if (currentClipOrder !== currentClip.order) {
-    await chrome.storage.local.set({ currentClipOrder: currentClip.order });
-  }
-
-  await chrome.storage.local.set({ currentClipId: currentClip.id });
 
   const clipData = normalizeClipData(currentClip);
   if (!clipData) return;
@@ -956,20 +966,13 @@ async function startPlaylistMode() {
 
   function playPlaylistClip(clipData) {
     stopCurrent = Clip.play(clipData, {
+      onStart: clearAutoNavigation,
       onEnd: handlePlaylistEnd
     });
   }
 
   function handlePlaylistEnd() {
-    chrome.storage.local.get(['playQueue', 'currentClipOrder'], (res) => {
-      const { playQueue, currentClipOrder } = res;
-      if (Array.isArray(playQueue)) {
-        playlistNextClip(playQueue, currentClipOrder ?? fallbackOrder);
-      } else {
-        console.warn('[Playlist] playQueue が無効。playlist終了');
-        chrome.storage.local.set({ playlistSystemKey: 0 });
-      }
-    });
+    void playlistNextClip(sortedQueue, activeOrder ?? fallbackOrder);
   }
 
   async function playlistNextClip(playQueue, currentOrder) {
@@ -988,16 +991,24 @@ async function startPlaylistMode() {
 
     const next = isLast ? sortedQueue[0] : sortedQueue[currentIndex + 1];
     const nextOrder = next.order ?? 0;
-    const nextId = next.id;
+    const nextId = next.clipId ?? next.id;
 
-    await chrome.storage.local.set({
+    const transitioned = await transitionPlaybackSession('playlist', next, {
+      playQueue: sortedQueue,
       currentClipOrder: nextOrder,
-      currentClipId: nextId
+      currentClipId: nextId,
+      nextClip: next,
+      playClipSystemKey: 0,
+      playlistSystemKey: 1,
+      playmode: 'playlist'
     });
+    if (!transitioned) return;
+    currentSession = transitioned;
+    activeOrder = nextOrder;
 
     const nextClipData = normalizeClipData(next);
     if (!nextClipData) {
-      console.warn('[Playlist] 次クリップのデータが不正です:', next);
+      console.warn('[Playlist] 次クリップのデータが不正です');
       return;
     }
 
@@ -1005,17 +1016,19 @@ async function startPlaylistMode() {
     const nextUrl = normalizeClipUrl(next);
 
     if (currentUrl && nextUrl && currentUrl !== nextUrl) {
-      const url = buildClipUrl(nextUrl, nextClipData.startTime);
-      console.log('[Playlist] 異なるURL → ページ遷移:', url);
-      if (!url) return;
+      const baseUrl = buildClipUrl(nextUrl, nextClipData.startTime);
+      if (!baseUrl) return;
+      const url = addPlaybackOwnerToUrl(baseUrl, activePlaybackOwnerNonce);
+      console.log('[Playlist] 異なるURLへページ遷移します');
 
       setTimeout(async () => {
-        await beginAutoNavigation({
+        const prepared = await beginAutoNavigation({
           mode: 'playlist',
           nextUrl: url,
           nextOrder,
           nextId
         });
+        if (!prepared) return;
         window.location.href = url;
       }, 150);
       return;
@@ -1026,73 +1039,16 @@ async function startPlaylistMode() {
 }
 
 
-    function resolvePlayMode(playmode, playClipSystemKey, playlistSystemKey) {
-      if (playmode === 'playlist' || playmode === 'clip') {
-        return playmode;
-      }
-
-      if (playClipSystemKey === 1 && playlistSystemKey === 1) {
-        return 'clip';
-      }
-
-      if (playClipSystemKey === 1) {
-        return 'clip';
-      }
-
-      if (playlistSystemKey === 1) {
-        return 'playlist';
-      }
-
-      return null;
-    }
-
     async function startPreferredMode() {
-      const autoNav = await loadAutoNav();
-      if (autoNav?.mode === 'playlist') {
-        console.log('[AutoNav] Restore playlist:', autoNav);
-        await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: 'playlist' });
-        await startPlaylistMode();
-        await clearAutoNavState();
-        return;
+      const ownerNonce = getTabPlaybackOwnerNonce();
+      const session = await claimPlaybackSession(ownerNonce);
+      if (!session) return;
+      currentSession = session;
+      if (session.context.mode === 'playlist') {
+        await startPlaylistMode(session);
+      } else if (session.context.mode === 'clip') {
+        await startClipMode(session);
       }
-
-      if (autoNav?.mode === 'clip') {
-        console.log('[AutoNav] Restore clip:', autoNav);
-        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0, playmode: 'clip' });
-        await startClipMode();
-        await clearAutoNavState();
-        return;
-      }
-
-      if (autoNav) {
-        console.warn('[AutoNav] Unknown mode, clearing:', autoNav);
-        await clearAutoNavState();
-      }
-
-      const { playClipSystemKey, playlistSystemKey, playmode } = await chrome.storage.local.get([
-        'playClipSystemKey',
-        'playlistSystemKey',
-        'playmode'
-      ]);
-
-      const resolvedMode = resolvePlayMode(playmode, playClipSystemKey, playlistSystemKey);
-
-      if (resolvedMode === 'playlist') {
-        await chrome.storage.local.set({ playClipSystemKey: 0, playlistSystemKey: 1, playmode: 'playlist' });
-        await startPlaylistMode();
-        return;
-      }
-
-      if (resolvedMode === 'clip') {
-        if (playClipSystemKey === 1 && playlistSystemKey === 1 && !playmode) {
-          console.warn("⚠️ 両モードがON。Clipを優先して矯正します。");
-        }
-
-        await chrome.storage.local.set({ playClipSystemKey: 1, playlistSystemKey: 0, playmode: 'clip' });
-        await startClipMode();
-        return;
-      }
-
     }
 
     function stopActiveMode() {
@@ -1106,12 +1062,12 @@ async function startPlaylistMode() {
       loopEnabled = !loopEnabled;
       if (loopEnabled) {
         console.log('[Loop] ON');
-        stopActiveMode();
-        const clipData = await loadClipData();
+        const clipData = loadClipData();
         if (!clipData) {
           loopEnabled = false;
           return;
         }
+        stopActiveMode();
         stopCurrent = Playlist.play([clipData], { loop: loopEnabled });
       } else {
         console.log('[Loop] OFF - stop playback');
@@ -1120,15 +1076,21 @@ async function startPlaylistMode() {
     }
 
     function bootstrap() {
-      window.addEventListener('load', () => {
+      const start = () => {
         stopActiveMode();
-        startPreferredMode();
-      });
+        void startPreferredMode();
+      };
+      if (document.readyState === 'complete') {
+        start();
+      } else {
+        window.addEventListener('load', start, { once: true });
+      }
     }
 
     return {
       bootstrap,
-      toggleLoop
+      toggleLoop,
+      stop: stopActiveMode
     };
   })();
 
@@ -1140,19 +1102,23 @@ async function startPlaylistMode() {
 
   Mode.bootstrap();
 
-  window.addEventListener('locationchange', () => UI.scheduleInjection());
+  window.addEventListener('historyChange', (event) => {
+    UI.scheduleInjection();
+    const nextLocation = routeIdentity(event.detail?.url || location.href);
+    handleOwnedPlaybackRouteChange({
+      ownerNonce: activePlaybackOwnerNonce,
+      currentRoute: playbackLocation,
+      nextRoute: nextLocation,
+      onAutoNavigation: (route) => {
+        playbackLocation = route;
+      },
+      onManualNavigation: deactivatePlaybackContext,
+    });
+  });
   window.addEventListener('load', () => UI.scheduleInjection(), { once: true });
 
   window.addEventListener('beforeunload', () => {
-    if (isAutoNavigation() || isAutoNavActive()) {
-      return;
-    }
-
-    chrome.storage.local.set({
-      playClipSystemKey: 0,
-      playlistSystemKey: 0,
-      currentClipOrder: 0,
-      playmode: null
-    });
+    clearPlaybackContext();
+    closeCommentPanel();
   });
 })();

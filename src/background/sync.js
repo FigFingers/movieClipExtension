@@ -6,6 +6,13 @@ import {
   normalizePendingClips,
   clearExtensionAuthState,
 } from './../shared/storage.js';
+import {
+  isValidExtensionAuthToken,
+  isValidExtensionInstanceId,
+} from './../shared/authValidation.js';
+import { runExclusive } from './authMutex.js';
+import { getOrCreateInstanceIdWhileExclusive } from './instanceId.js';
+import { fetchJsonWithTimeout } from './request.js';
 
 // 同期 fetch は background(service worker)で実行する。content script の fetch は
 // ページオリジン(netflix.com 等)の CORS に従いサイト API に 403 で弾かれるが、
@@ -17,14 +24,50 @@ const LOGIN_PROMPT_COOLDOWN_MS = 60 * 1000;
 
 // sync とトークンリフレッシュを直列化するミューテックス。ローテーション中に旧トークンで
 // sync が走ると 401 → トークン誤クリアになるため、両者は必ずこれを通す。
-let exclusiveChain = Promise.resolve();
-export function runExclusive(task) {
-  const run = exclusiveChain.then(() => task());
-  exclusiveChain = run.then(
+export { runExclusive } from './authMutex.js';
+
+// 保留キューの読み取り・変更・書き込みを、単一のバックグラウンド処理へ集約する。
+// 認証ミューテックスとは意図的に分離する。同期処理は通信中も認証ミューテックスを保持するが、
+// 新しいクリップの記録を最大15秒待たせてはならない。
+let pendingQueueMutationChain = Promise.resolve();
+function runPendingQueueMutation(task) {
+  const run = pendingQueueMutationChain.then(() => task());
+  pendingQueueMutationChain = run.then(
     () => {},
     () => {}
   );
   return run;
+}
+
+function isValidPendingClipForEnqueue(clip) {
+  return clip !== null
+    && typeof clip === 'object'
+    && !Array.isArray(clip)
+    && typeof clip.clientItemId === 'string'
+    && clip.clientItemId.length > 0
+    && typeof clip.url === 'string'
+    && clip.url.length > 0
+    && Number.isFinite(clip.startTime)
+    && Number.isFinite(clip.endTime);
+}
+
+export function enqueuePendingClipInBackground(clip) {
+  if (!isValidPendingClipForEnqueue(clip)) {
+    return Promise.resolve({ ok: false, reason: 'invalid_clip' });
+  }
+
+  return runPendingQueueMutation(async () => {
+    const stored = await storageGet([STORAGE_KEYS.pendingClips]);
+    const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
+    const queueById = new Map(
+      pendingClips.map((pendingClip) => [pendingClip.clientItemId, pendingClip])
+    );
+    queueById.set(clip.clientItemId, clip);
+    await storageSet({
+      [STORAGE_KEYS.pendingClips]: Array.from(queueById.values()),
+    });
+    return { ok: true };
+  });
 }
 
 function toExtensionSyncItem(clip) {
@@ -52,12 +95,6 @@ function toExtensionSyncItem(clip) {
   };
 }
 
-function parseResponseJson(response) {
-  return response
-    .json()
-    .catch(() => null);
-}
-
 function collectClientItemIds(value, ids = new Set()) {
   if (!value || typeof value !== 'object') return ids;
 
@@ -82,52 +119,117 @@ async function removePendingClipIds(clientItemIds) {
   const ids = new Set(clientItemIds.filter(Boolean));
   if (ids.size === 0) return;
 
-  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
-  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
-  await storageSet({
-    [STORAGE_KEYS.pendingClips]: pendingClips.filter(
-      (clip) => !ids.has(clip.clientItemId)
-    ),
+  await runPendingQueueMutation(async () => {
+    const stored = await storageGet([STORAGE_KEYS.pendingClips]);
+    const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
+    await storageSet({
+      [STORAGE_KEYS.pendingClips]: pendingClips.filter(
+        (clip) => !ids.has(clip.clientItemId)
+      ),
+    });
   });
 }
 
-export async function openLoginTab({ force = false } = {}) {
+function validateSyncSuccessResponse(data, pendingClips) {
+  if (
+    data === null
+    || typeof data !== 'object'
+    || Array.isArray(data)
+    || data.ok !== true
+    || !Array.isArray(data.acceptedItemIds)
+  ) {
+    return null;
+  }
+
+  const attemptedIds = new Set(pendingClips.map((clip) => clip.clientItemId));
+  const acceptedIds = new Set();
+  for (const clientItemId of data.acceptedItemIds) {
+    if (
+      typeof clientItemId !== 'string'
+      || !attemptedIds.has(clientItemId)
+      || acceptedIds.has(clientItemId)
+    ) {
+      return null;
+    }
+    acceptedIds.add(clientItemId);
+  }
+
+  return Array.from(acceptedIds);
+}
+
+async function performOpenLoginTab({ force = false } = {}) {
   if (!force) {
     const stored = await storageGet([LOGIN_PROMPT_STORAGE_KEY]);
     const lastOpenedAt = Number(stored[LOGIN_PROMPT_STORAGE_KEY]) || 0;
     if (Date.now() - lastOpenedAt < LOGIN_PROMPT_COOLDOWN_MS) {
-      return { ok: false, reason: 'cooldown' };
+      return { ok: true, skipped: true, reason: 'cooldown' };
     }
   }
 
-  await storageSet({ [LOGIN_PROMPT_STORAGE_KEY]: Date.now() });
-
-  return new Promise((resolve) => {
+  const result = await new Promise((resolve) => {
     chrome.tabs.create({ url: getSiteUrl('/login') }, (tab) => {
       if (chrome.runtime.lastError) {
-        resolve({ ok: false, error: chrome.runtime.lastError.message });
+        resolve({
+          ok: false,
+          reason: 'tab_create_failed',
+          error: chrome.runtime.lastError.message,
+        });
         return;
       }
       resolve({ ok: true, tabId: tab?.id });
     });
   });
+
+  // A failed tabs.create must remain immediately retryable. Record cooldown
+  // only after Chrome confirms that a login tab was actually opened.
+  if (result.ok) {
+    await storageSet({ [LOGIN_PROMPT_STORAGE_KEY]: Date.now() });
+  }
+  return result;
+}
+
+let loginTabInFlight = null;
+export function openLoginTab(options = {}) {
+  if (!loginTabInFlight) {
+    loginTabInFlight = performOpenLoginTab(options)
+      .finally(() => {
+        loginTabInFlight = null;
+      });
+  }
+  return loginTabInFlight;
 }
 
 async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {}) {
   const stored = await storageGet([
     STORAGE_KEYS.extensionInstanceId,
     STORAGE_KEYS.extensionAuthToken,
+    STORAGE_KEYS.extensionLinked,
     STORAGE_KEYS.pendingClips,
   ]);
   const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
-  const extensionAuthToken = stored[STORAGE_KEYS.extensionAuthToken] || null;
+  const extensionAuthToken = stored[STORAGE_KEYS.extensionAuthToken];
   const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
 
   if (pendingClips.length === 0) {
     return { ok: true, skipped: true, reason: 'empty_queue' };
   }
 
-  if (!extensionAuthToken || !extensionInstanceId) {
+  if (!isValidExtensionInstanceId(extensionInstanceId)) {
+    await getOrCreateInstanceIdWhileExclusive();
+  } else if (
+    !isValidExtensionAuthToken(extensionAuthToken)
+    && (
+      extensionAuthToken !== undefined
+      || stored[STORAGE_KEYS.extensionLinked] === true
+    )
+  ) {
+    await clearExtensionAuthState();
+  }
+
+  if (
+    !isValidExtensionAuthToken(extensionAuthToken)
+    || !isValidExtensionInstanceId(extensionInstanceId)
+  ) {
     console.log('[extension-sync] sync start', {
       clipCount: pendingClips.length,
       hasToken: false,
@@ -145,30 +247,31 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
     hasToken: true,
   });
 
-  let response;
-  let data = null;
+  const request = await fetchJsonWithTimeout(getApiEndpoint('extension/sync'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${extensionAuthToken}`,
+    },
+    body: JSON.stringify({
+      extensionInstanceId,
+      items: pendingClips.map(toExtensionSyncItem),
+    }),
+  });
 
-  try {
-    response = await fetch(getApiEndpoint('extension/sync'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${extensionAuthToken}`,
-      },
-      body: JSON.stringify({
-        extensionInstanceId,
-        items: pendingClips.map(toExtensionSyncItem),
-      }),
-    });
-
-    data = await parseResponseJson(response);
-  } catch (error) {
+  if (!request.ok) {
     console.warn('[extension-sync] network error; keeping clips queued', {
       clipCount: pendingClips.length,
-      message: error?.message,
+      message: request.error?.message,
+      timedOut: request.timedOut,
     });
-    return { ok: false, queued: true, reason: 'network_error' };
+    return {
+      ok: false,
+      queued: true,
+      reason: request.timedOut ? 'timeout' : 'network_error',
+    };
   }
+  const { response, data } = request;
 
   console.log('[extension-sync] sync result', {
     status: response.status,
@@ -176,12 +279,12 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
   });
 
   if (response.status === 200) {
-    // フィールドが存在すればそれが権威的（空配列＝受理ゼロなので何も削除しない）。
-    // フィールド自体が無いレガシー応答のときだけ、従来どおり全送信分を削除する。
-    const hasAcceptedField = Array.isArray(data?.acceptedItemIds);
-    const syncedItemIds = hasAcceptedField
-      ? data.acceptedItemIds
-      : pendingClips.map((clip) => clip.clientItemId);
+    const syncedItemIds = validateSyncSuccessResponse(data, pendingClips);
+    if (syncedItemIds === null) {
+      console.warn('[extension-sync] malformed success response; keeping clips queued');
+      return { ok: false, queued: true, reason: 'invalid_response' };
+    }
+
     await removePendingClipIds(syncedItemIds);
     await storageSet({ [STORAGE_KEYS.lastSyncAt]: new Date().toISOString() });
     return { ok: true, acceptedCount: syncedItemIds.length };
@@ -189,19 +292,30 @@ async function performSyncPendingQueue({ openLoginIfMissingToken = false } = {})
 
   if (response.status === 400) {
     const issueItemIds = Array.from(collectClientItemIds(data?.issues || data));
-    const dropItemIds = issueItemIds.length > 0
-      ? issueItemIds
-      : pendingClips.map((clip) => clip.clientItemId);
+    if (issueItemIds.length === 0) {
+      // 本番の検証エラー応答は、意図的にスキーマ詳細を返さない。
+      // 一般的な400では不正項目を特定できないため、試行した一括処理全体を削除すると
+      // 受理確認なしで有効なクリップまで失われる。
+      console.warn('[extension-sync] validation error without item IDs; keeping clips queued', {
+        clipCount: pendingClips.length,
+      });
+      return { ok: false, queued: true, reason: 'validation_error' };
+    }
 
-    console.warn('[extension-sync] validation error; dropping attempted clips', {
-      clipCount: dropItemIds.length,
-      issues: data?.issues || data?.error || data?.message,
+    console.warn('[extension-sync] validation error; dropping identified clips', {
+      clipCount: issueItemIds.length,
     });
-    await removePendingClipIds(dropItemIds);
+    await removePendingClipIds(issueItemIds);
     return { ok: false, queued: false, reason: 'validation_error' };
   }
 
   if (response.status === 401) {
+    const current = await storageGet([STORAGE_KEYS.extensionAuthToken]);
+    if (current[STORAGE_KEYS.extensionAuthToken] !== extensionAuthToken) {
+      console.log('[extension-sync] stale sync 401 for replaced token; keeping current token');
+      return { ok: false, queued: true, reason: 'stale_unauthorized' };
+    }
+
     await clearExtensionAuthState();
     console.warn('[extension-sync] auth token rejected; cleared token and kept queue');
     if (openLoginIfMissingToken) {

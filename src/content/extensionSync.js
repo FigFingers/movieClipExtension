@@ -1,11 +1,12 @@
 import {
   STORAGE_KEYS,
   storageGet,
-  storageSet,
-  storageRemove,
   normalizePendingClips,
-  clearExtensionAuthState,
 } from './../shared/storage.js';
+import {
+  isValidExtensionAuthToken,
+  isValidExtensionInstanceId,
+} from './../shared/authValidation.js';
 
 // このモジュールは content script 専用。サイト API への fetch(同期・トークンリフレッシュ)は
 // background(src/background/sync.js, tokenRefresh.js)が担う。content の fetch はページ
@@ -58,7 +59,7 @@ function sendRuntimeMessage(message) {
 export async function getOrCreateExtensionInstanceId() {
   const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
   const existingId = stored[STORAGE_KEYS.extensionInstanceId];
-  if (existingId) {
+  if (isValidExtensionInstanceId(existingId)) {
     return existingId;
   }
 
@@ -66,7 +67,7 @@ export async function getOrCreateExtensionInstanceId() {
   // 読んで別 UUID を作ると instanceId 不一致でトークンが拒否されるため、ここでは自前生成
   // せず background の直列化された生成器から取得する。
   const response = await sendRuntimeMessage({ type: 'GET_OR_CREATE_INSTANCE_ID' });
-  if (response?.ok && response.extensionInstanceId) {
+  if (response?.ok && isValidExtensionInstanceId(response.extensionInstanceId)) {
     return response.extensionInstanceId;
   }
   throw new Error(response?.message || 'Failed to obtain extensionInstanceId');
@@ -74,7 +75,10 @@ export async function getOrCreateExtensionInstanceId() {
 
 export async function getExtensionInstanceId() {
   const stored = await storageGet([STORAGE_KEYS.extensionInstanceId]);
-  return stored[STORAGE_KEYS.extensionInstanceId] ?? null;
+  const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
+  return isValidExtensionInstanceId(extensionInstanceId)
+    ? extensionInstanceId
+    : null;
 }
 
 export async function getExtensionConnectionState() {
@@ -85,7 +89,10 @@ export async function getExtensionConnectionState() {
     STORAGE_KEYS.lastSyncAt,
     STORAGE_KEYS.pendingClips,
   ]);
-  const extensionAuthToken = stored[STORAGE_KEYS.extensionAuthToken] || null;
+  const storedAuthToken = stored[STORAGE_KEYS.extensionAuthToken];
+  const extensionAuthToken = isValidExtensionAuthToken(storedAuthToken)
+    ? storedAuthToken
+    : null;
 
   return {
     extensionInstanceId,
@@ -97,34 +104,13 @@ export async function getExtensionConnectionState() {
 }
 
 export async function saveExtensionAuthToken(extensionInstanceId, extensionAuthToken, expiresAt) {
-  const currentInstanceId = await getOrCreateExtensionInstanceId();
-  if (extensionInstanceId !== currentInstanceId) {
-    console.warn('[extension-sync] ignored auth token for mismatched extensionInstanceId', {
-      expected: currentInstanceId,
-      received: extensionInstanceId,
-    });
-    return false;
-  }
-
-  if (!extensionAuthToken || typeof extensionAuthToken !== 'string') {
-    console.warn('[extension-sync] ignored empty auth token');
-    return false;
-  }
-
-  // expiresAt はサーバ発行の ISO 文字列。欠落時(旧サイト)でもトークン自体は保存し、
-  // background のリフレッシュが期限付きトークンへ移行させる。
-  const expiresAtMs = Date.parse(expiresAt || '');
-  await storageSet({
-    [STORAGE_KEYS.extensionAuthToken]: extensionAuthToken,
-    [STORAGE_KEYS.extensionTokenExpiresAt]: Number.isFinite(expiresAtMs)
-      ? new Date(expiresAtMs).toISOString()
-      : null,
-    [STORAGE_KEYS.extensionLinked]: true,
+  const result = await sendRuntimeMessage({
+    type: 'SAVE_EXTENSION_AUTH_TOKEN',
+    extensionInstanceId,
+    extensionAuthToken,
+    expiresAt,
   });
-  // 新しいトークンを受けた時点で旧トークン時代の失敗回数は無効。抑制を持ち越すと
-  // 再連携直後のリフレッシュが不要に待たされる。
-  await storageRemove([STORAGE_KEYS.extensionTokenRefreshBackoff]);
-  return true;
+  return Boolean(result?.ok);
 }
 
 export function toExtensionClipPayload(clip) {
@@ -147,14 +133,13 @@ export function toExtensionClipPayload(clip) {
 
 export async function enqueueClip(clip) {
   const normalizedClip = toExtensionClipPayload(clip);
-  const stored = await storageGet([STORAGE_KEYS.pendingClips]);
-  const pendingClips = normalizePendingClips(stored[STORAGE_KEYS.pendingClips]);
-  const queueById = new Map(pendingClips.map((item) => [item.clientItemId, item]));
-  queueById.set(normalizedClip.clientItemId, normalizedClip);
-
-  await storageSet({
-    [STORAGE_KEYS.pendingClips]: Array.from(queueById.values()),
+  const result = await sendRuntimeMessage({
+    type: 'ENQUEUE_PENDING_CLIP',
+    clip: normalizedClip,
   });
+  if (!result?.ok) {
+    throw new Error(result?.message || result?.reason || 'Failed to enqueue clip');
+  }
 
   return normalizedClip;
 }
@@ -203,17 +188,8 @@ export async function handleExtensionLinkWithAuthToken(message) {
 }
 
 export async function handleExtensionUnlinked(message) {
-  // 未連携時に unlink を受けても instanceId を新規発行しないよう、保存済みの値だけ読む。
-  const currentInstanceId = await getExtensionInstanceId();
-  if (!currentInstanceId || message?.extensionInstanceId !== currentInstanceId) {
-    console.warn('[extension-sync] ignored unlink for mismatched extensionInstanceId', {
-      expected: currentInstanceId,
-      received: message?.extensionInstanceId,
-    });
-    return { ok: false };
-  }
-
-  await clearExtensionAuthState();
-  console.log('[extension-sync] cleared auth state after unlink');
-  return { ok: true };
+  return sendRuntimeMessage({
+    type: 'UNLINK_EXTENSION',
+    extensionInstanceId: message?.extensionInstanceId,
+  });
 }

@@ -6,7 +6,14 @@ import {
   storageRemove,
   clearExtensionAuthState,
 } from './../shared/storage.js';
-import { runExclusive } from './sync.js';
+import {
+  isValidExtensionInstanceId,
+  isValidExtensionAuthToken,
+  normalizeExtensionTokenExpiry,
+} from './../shared/authValidation.js';
+import { runExclusive } from './authMutex.js';
+import { getOrCreateInstanceIdWhileExclusive } from './instanceId.js';
+import { fetchJsonWithTimeout } from './request.js';
 
 // トークンはサーバ発行の不透明トークン(JWT ではない)。期限はサーバが link/refresh 応答の
 // expiresAt で通知し、拡張は storage に保存した値だけを見て更新時期を判断する。
@@ -27,10 +34,8 @@ function computeBackoffMs(failureCount, status) {
 }
 
 // バックオフは「どのトークンで失敗したか」に紐づけて保存する。
-// content 側の saveExtensionAuthToken() は runExclusive の外で storage を書き換えるため、
-// 「保存済みトークンを確認してから書く」形にしても確認と書き込みの間に再連携が割り込む
-// 余地が残る(TOCTOU)。書き込み側の原子性に頼らず、読み出し側で現在のトークンと照合し、
-// 一致しない記録は無効として扱う。これなら古い試行が後から書き戻しても影響しない。
+// auth bridge を含むトークン更新は同じ runExclusive に集約している。fingerprint も保持し、
+// 永続化済みの旧バックオフ記録が再連携後の新トークンを抑制しないようにする。
 async function tokenFingerprint(token) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   return Array.from(new Uint8Array(digest).slice(0, 8))
@@ -70,6 +75,23 @@ function clearRefreshBackoff() {
   return storageRemove([STORAGE_KEYS.extensionTokenRefreshBackoff]);
 }
 
+function normalizeRefreshSuccess(data) {
+  const expiresAt = normalizeExtensionTokenExpiry(data?.expiresAt);
+  if (
+    data?.ok !== true
+    || !isValidExtensionAuthToken(data.extensionAuthToken)
+    || expiresAt === null
+    || Date.parse(expiresAt) <= Date.now()
+  ) {
+    return null;
+  }
+
+  return {
+    extensionAuthToken: data.extensionAuthToken,
+    expiresAt,
+  };
+}
+
 export function checkAndRefreshToken() {
   return runExclusive(performCheckAndRefreshToken);
 }
@@ -78,13 +100,25 @@ async function performCheckAndRefreshToken() {
   const stored = await storageGet([
     STORAGE_KEYS.extensionAuthToken,
     STORAGE_KEYS.extensionInstanceId,
+    STORAGE_KEYS.extensionLinked,
     STORAGE_KEYS.extensionTokenExpiresAt,
     STORAGE_KEYS.extensionTokenRefreshBackoff,
   ]);
   const token = stored[STORAGE_KEYS.extensionAuthToken];
   const extensionInstanceId = stored[STORAGE_KEYS.extensionInstanceId];
 
-  if (!token || !extensionInstanceId) {
+  if (!isValidExtensionInstanceId(extensionInstanceId)) {
+    await getOrCreateInstanceIdWhileExclusive();
+    return { ok: true, skipped: true, reason: 'not_linked' };
+  }
+
+  if (!isValidExtensionAuthToken(token)) {
+    if (
+      token !== undefined
+      || stored[STORAGE_KEYS.extensionLinked] === true
+    ) {
+      await clearExtensionAuthState();
+    }
     return { ok: true, skipped: true, reason: 'not_linked' };
   }
 
@@ -115,35 +149,43 @@ async function performCheckAndRefreshToken() {
     return { ok: true, skipped: true, reason: 'not_due' };
   }
 
-  let response;
-  let data = null;
+  const request = await fetchJsonWithTimeout(getApiEndpoint('extension/token/refresh'), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ extensionInstanceId }),
+  });
 
-  try {
-    response = await fetch(getApiEndpoint('extension/token/refresh'), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ extensionInstanceId }),
-    });
-    data = await response.json().catch(() => null);
-  } catch (error) {
+  if (!request.ok) {
     console.warn('[extension-sync] token refresh failed; keeping current token', {
-      message: error?.message,
+      message: request.error?.message,
+      timedOut: request.timedOut,
     });
     await recordRefreshFailure(token, null);
-    return { ok: false, reason: 'network_error' };
+    return {
+      ok: false,
+      reason: request.timedOut ? 'timeout' : 'network_error',
+    };
   }
+  const { response, data } = request;
 
-  if (response.status === 200 && typeof data?.extensionAuthToken === 'string') {
+  if (response.status === 200) {
+    const refreshed = normalizeRefreshSuccess(data);
+    if (!refreshed) {
+      console.warn('[extension-sync] malformed token refresh response; keeping current token');
+      await recordRefreshFailure(token, response.status);
+      return { ok: false, reason: 'invalid_response' };
+    }
+
     await storageSet({
-      [STORAGE_KEYS.extensionAuthToken]: data.extensionAuthToken,
-      [STORAGE_KEYS.extensionTokenExpiresAt]: data.expiresAt || null,
+      [STORAGE_KEYS.extensionAuthToken]: refreshed.extensionAuthToken,
+      [STORAGE_KEYS.extensionTokenExpiresAt]: refreshed.expiresAt,
       [STORAGE_KEYS.extensionLinked]: true,
     });
     await clearRefreshBackoff();
-    console.log('[extension-sync] token refreshed', { expiresAt: data.expiresAt });
+    console.log('[extension-sync] token refreshed', { expiresAt: refreshed.expiresAt });
     return { ok: true, refreshed: true };
   }
 

@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ICON_NAMES, createIcon, isIconName } from "../src/ui/icons.js";
+import { ICON_NAMES, createIcon, isIconName } from "../../src/ui/icons.js";
 
 test("ICON_NAMES は統合した 4 アイコンを含む", () => {
   assert.deepEqual([...ICON_NAMES].sort(), ["comment", "list", "loop", "record"]);
