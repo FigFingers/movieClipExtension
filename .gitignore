@@ -42,12 +42,8 @@ yarn-error.log*
 next-env.d.ts
 CODE_ISSUES_FOR_LLM.md
 
-# Keep current guides in Git; historical analysis and captured pages stay local.
-/docs/*
-!/docs/README.md
-!/docs/recording-and-sync.md
-!/docs/testing.md
-!/docs/architecture.md
+# local analysis / docs (not tracked)
+/docs
 
 # claude code local files
 /.claude
