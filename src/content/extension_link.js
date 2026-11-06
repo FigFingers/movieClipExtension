@@ -4,6 +4,7 @@ import {
   handleExtensionUnlinked,
 } from './extensionSync.js';
 import { SITE_ORIGIN } from './../api.js';
+import { handleExtensionLinkWithLinkToken } from './linkTokenBridge.js';
 
 // 認証ブリッジのメッセージを受け付ける信頼済みオリジン（アプリ本体のみ）。
 // manifest を絞っていても、別ポート等で読み込まれた場合の多層防御として検証する。
@@ -58,6 +59,7 @@ window.addEventListener('message', async (event) => {
     data.type !== 'EXTENSION_AUTH_STATUS_REQUEST' &&
     data.type !== 'EXTENSION_CHECK_AUTH' &&
     data.type !== 'EXT_LINK_WITH_AUTH_TOKEN' &&
+    data.type !== 'EXT_LINK_WITH_LINK_TOKEN' &&
     data.type !== 'EXTENSION_UNLINKED'
   ) return;
 
@@ -72,6 +74,11 @@ window.addEventListener('message', async (event) => {
 
     if (data.type === 'EXT_LINK_WITH_AUTH_TOKEN') {
       await handleExtensionLinkWithAuthToken(data);
+      return;
+    }
+
+    if (data.type === 'EXT_LINK_WITH_LINK_TOKEN') {
+      await handleExtensionLinkWithLinkToken(data, event.origin);
       return;
     }
 
