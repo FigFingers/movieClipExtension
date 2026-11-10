@@ -5,6 +5,8 @@ import {
 import { openLoginTab, syncPendingQueue } from './sync.js';
 import { checkAndRefreshToken } from './tokenRefresh.js';
 
+import { registerLinkTokenExchange } from './linkTokenExchange.js';
+
 const DEMO_BASE_URL = 'http://localhost:3000/';
 const WELCOME_VERSION_KEY = 'lastSeenWelcomeVersion';
 const WHATSNEW_VERSION_KEY = 'lastSeenWhatsNewVersion';
@@ -296,3 +298,6 @@ async function handleSeekMessage(sec, sender) {
 
   return { ok: true };
 }
+
+// サイト画面から受けた linkToken を、background で拡張用トークンに交換する。
+registerLinkTokenExchange();
